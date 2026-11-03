@@ -51,6 +51,14 @@ Other details:
 - **Expiry**: each push carries brrr’s `expiration_date`, so Apple keeps retrying a phone that is offline.
 - **Health**: `/api/health` reports the dispatcher’s last check-in. The app shows a warning if it goes
   quiet for 3 minutes.
+- **Mirror (optional)**: set `PUSH_MIRROR_URL` to a second gateway that speaks brrr's API, and give
+  people a mirror key on the People page. Each delivery is then copied to that gateway once, alongside
+  the brrr send. This is for running a self-hosted gateway side by side with brrr before relying on it.
+  - brrr stays the delivery of record: a mirror failure never changes a delivery's status, retries or
+    timing.
+  - The outcome is kept on the delivery: HTTP status, the gateway's message id, or the error.
+  - `GET /api/mirror/report?days=30` lists both outcomes for every delivery in the window, with
+    totals, so misses can be counted.
 - **Time zone and DST**: times are household wall-clock times (`HOUSEHOLD_TIMEZONE`). A daily 9:00 AM
   stays 9:00 AM across DST changes. A time skipped by spring-forward moves forward by the gap. A time that
   happens twice at fall-back means the first one.
@@ -86,6 +94,7 @@ Without `TEST_DATABASE_URL`, the database tests are skipped and the pure ones st
 | `RETENTION_DAYS` | `180` | Finished reminders and delivery history are pruned after this |
 | `IN_PROCESS_DISPATCH` | `true` | The web process also dispatches every minute |
 | `MIGRATE_ON_START` | `true` | Apply pending migrations at start |
+| `PUSH_MIRROR_URL` | empty | Optional second brrr-compatible gateway that gets a copy of every push (see Mirror above) |
 
 ## Deploying without Home Base
 

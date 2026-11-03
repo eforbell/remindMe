@@ -5,7 +5,9 @@
   const { esc, api, avatar, toast, confirmSheet } = RM;
   const $ = (id) => document.getElementById(id);
   let members = [];
+  let mirrorEnabled = false; // the server has a mirror gateway (PUSH_MIRROR_URL)
   const editing = new Set(); // people whose key field is open
+  const editingMirror = new Set(); // people whose mirror key field is open
   const renaming = new Set(); // people whose name field is open (no window.prompt: iOS wrappers drop it)
 
   function status(m) {
@@ -13,6 +15,36 @@
     if (m.last_error && (!m.last_ok_at || new Date(m.last_error_at) > new Date(m.last_ok_at))) return { cls: 'bad', text: 'Last send failed' };
     if (m.last_ok_at) return { cls: 'ok', text: `Ready · last delivered ${RM.relativeAgo(m.last_ok_at)}` };
     return { cls: 'warn', text: 'Key saved · not tested yet' };
+  }
+
+  // Optional second gateway that gets a copy of every push (for side-by-side testing). brrr is unaffected.
+  function mirrorBlock(m) {
+    if (!mirrorEnabled) return '';
+    const open = editingMirror.has(m.id);
+    let state = 'No mirror key';
+    let cls = 'warn';
+    if (m.has_mirror_key) {
+      if (m.mirror_last_error && (!m.mirror_last_ok_at || new Date(m.mirror_last_error_at) > new Date(m.mirror_last_ok_at))) { state = 'Mirror: last copy failed'; cls = 'bad'; }
+      else if (m.mirror_last_ok_at) { state = `Mirror: last copy ${RM.relativeAgo(m.mirror_last_ok_at)}`; cls = 'ok'; }
+      else state = 'Mirror key saved · not tested yet';
+    }
+    return `
+        <div class="mirror-block">
+          <div class="person-status"><span class="status-dot ${cls}"></span>${esc(state)}${m.has_mirror_key ? ` <code>${esc(m.mirror_key_preview)}</code>` : ''}</div>
+          ${cls === 'bad' && m.mirror_last_error ? `<p class="person-error">${esc(m.mirror_last_error)}</p>` : ''}
+          ${open ? `
+            <form class="key-row" data-mirror-form="${m.id}" autocomplete="off">
+              <input type="password" name="key" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false"
+                     autocomplete="off" placeholder="Paste mirror webhook secret" aria-label="mirror key for ${esc(m.name)}">
+              <button type="submit" class="btn-solid">Save</button>
+            </form>` : ''}
+          <div class="person-actions">
+            ${m.has_mirror_key ? `<button type="button" class="btn-ghost btn-sm" data-do="mirror-test" data-id="${m.id}">Test mirror</button>` : ''}
+            ${open ? `<button type="button" class="btn-ghost btn-sm" data-do="mirror-cancel" data-id="${m.id}">Cancel</button>`
+                   : `<button type="button" class="btn-ghost btn-sm" data-do="mirror-change" data-id="${m.id}">${m.has_mirror_key ? 'Change mirror key' : 'Add mirror key'}</button>`}
+            ${m.has_mirror_key ? `<button type="button" class="btn-ghost btn-sm" data-do="mirror-clear" data-id="${m.id}">Remove mirror key</button>` : ''}
+          </div>
+        </div>`;
   }
 
   function card(m) {
@@ -48,13 +80,15 @@
           ${m.has_key ? `<button type="button" class="btn-ghost btn-sm" data-do="clear" data-id="${m.id}">Remove key</button>` : ''}
           <button type="button" class="btn-ghost btn-sm" data-do="rename" data-id="${m.id}">Rename</button>
           <button type="button" class="btn-danger btn-sm" data-do="remove" data-id="${m.id}">Remove</button>
-        </div>
+        </div>${mirrorBlock(m)}
       </article>`;
   }
 
   async function load() {
     try {
-      ({ members } = await api('api/members'));
+      const data = await api('api/members');
+      members = data.members;
+      mirrorEnabled = Boolean(data.mirror_enabled);
       render();
     } catch (err) {
       $('person-list').innerHTML = `<div class="person-card"><p class="person-error">${esc(err.message)}</p></div>`;
@@ -77,6 +111,23 @@
         if (name) await api(`api/members/${id}`, { method: 'PATCH', body: { name } });
         renaming.delete(id);
         await load();
+      } catch (err) { toast(err.message, 'bad'); }
+      return;
+    }
+    const mirrorForm = e.target.closest('[data-mirror-form]');
+    if (mirrorForm) {
+      e.preventDefault();
+      const id = Number(mirrorForm.dataset.mirrorForm);
+      const input = mirrorForm.querySelector('input');
+      const key = input.value.trim();
+      if (!key) { input.focus(); return; }
+      try {
+        await api(`api/members/${id}/mirror`, { method: 'PUT', body: { key } });
+        input.value = '';
+        editingMirror.delete(id);
+        toast('Mirror key saved. Sending a test…');
+        await load();
+        await testMirror(id);
       } catch (err) { toast(err.message, 'bad'); }
       return;
     }
@@ -114,6 +165,17 @@
     await load();
   }
 
+  async function testMirror(id) {
+    const m = members.find((x) => x.id === id);
+    try {
+      const r = await api(`api/members/${id}/mirror/test`, { method: 'POST', body: { level: 'active' } });
+      toast(r.ok ? `Mirror test sent to ${m?.name}.` : `Mirror test failed: ${r.error}`, r.ok ? 'ok' : 'bad');
+    } catch (err) {
+      toast(err.message, 'bad');
+    }
+    await load();
+  }
+
   $('person-list').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-do]');
     if (!b) return;
@@ -125,6 +187,25 @@
         case 'test':
           b.disabled = true;
           await test(id);
+          break;
+        case 'mirror-test':
+          b.disabled = true;
+          await testMirror(id);
+          break;
+        case 'mirror-change':
+          editingMirror.add(id);
+          render();
+          document.querySelector(`[data-mirror-form="${id}"] input`)?.focus();
+          break;
+        case 'mirror-cancel':
+          editingMirror.delete(id);
+          render();
+          break;
+        case 'mirror-clear':
+          if (!(await confirmSheet({ title: `Remove ${m.name}’s mirror key?`, body: 'Copies to the mirror gateway stop. brrr delivery is unaffected.', confirmLabel: 'Remove', danger: true }))) return;
+          await api(`api/members/${id}/mirror`, { method: 'DELETE' });
+          toast('Mirror key removed');
+          await load();
           break;
         case 'change':
           editing.add(id);
