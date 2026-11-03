@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="180" height="180" role="img" aria-label="Remind Me">
+  <!-- Source for apple-touch-icon.png and the brrr notification icon. Full bleed with no corner radius:
+       iOS applies its own squircle mask. Regenerate the PNG with:
+         rsvg-convert -w 180 -h 180 apple-touch-icon.svg -o apple-touch-icon.png
+       The motif: a bell inside a clock bezel whose first quarter is lit, i.e. "on the quarter hour". -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#242862"/>
+      <stop offset="1" stop-color="#141634"/>
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" fill="url(#bg)"/>
+  <!-- bezel track and the lit quarter (12 → 3 o'clock) -->
+  <circle cx="50" cy="51" r="31" fill="none" stroke="#353a7a" stroke-width="7"/>
+  <path d="M50 20 A31 31 0 0 1 81 51" fill="none" stroke="#FFB547" stroke-width="7" stroke-linecap="round"/>
+  <!-- bell -->
+  <path d="M50 33.5c-7.6 0-12.6 5.9-12.6 13.4v7.2l-3.9 5.3c-.8 1.1 0 2.6 1.3 2.6h30.4c1.3 0 2.1-1.5 1.3-2.6l-3.9-5.3v-7.2c0-7.5-5-13.4-12.6-13.4z" fill="#F5F2EA"/>
+  <circle cx="50" cy="31.6" r="2.4" fill="#F5F2EA"/>
+  <path d="M45.2 64.6a4.8 4.8 0 0 0 9.6 0z" fill="#FFB547"/>
+</svg>

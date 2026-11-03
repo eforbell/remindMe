@@ -1,0 +1,19 @@
+# Standalone install (Home Base renders its own units from its catalog).
+[Unit]
+Description=Remind Me
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=remindme
+WorkingDirectory=/opt/remindMe
+EnvironmentFile=/opt/remindMe/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/remindMe/server.js
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

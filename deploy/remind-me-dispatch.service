@@ -1,0 +1,14 @@
+# One dispatcher pass: record due reminders, send pending pushes, retry failures.
+[Unit]
+Description=Remind Me dispatcher
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=remindme
+WorkingDirectory=/opt/remindMe
+EnvironmentFile=/opt/remindMe/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/remindMe/scripts/dispatch.js
+TimeoutStartSec=120

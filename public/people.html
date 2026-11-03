@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#141310">
+  <meta name="format-detection" content="telephone=no">
+  <title>People · Remind Me</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="sovereign-fonts.css">
+  <link rel="stylesheet" href="sovereign-chassis.css">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="remind-skin.css">
+  <script src="theme.js"></script>
+</head>
+<body class="page-people">
+  <div id="app">
+    <header class="topbar">
+      <a class="back-link" href="./">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        Reminders
+      </a>
+      <div class="topbar-actions"><button type="button" class="icon-btn" data-theme-toggle aria-label="Theme"></button></div>
+    </header>
+
+    <h1 class="page-title">People</h1>
+    <p class="page-sub">Each person needs their own brrr key to get reminders. Keys stay on this server and are never shown again in full.</p>
+
+    <div class="person-list" id="person-list"><div class="person-card"><span class="skeleton line" style="width:50%"></span></div></div>
+
+    <form class="person-card add-card" id="add-form" autocomplete="off" style="margin-top:12px">
+      <label class="field-label" for="add-name">Add someone</label>
+      <div class="inline-form">
+        <input id="add-name" type="text" maxlength="40" placeholder="Name" autocapitalize="words" enterkeyhint="done">
+        <button type="submit" class="btn-solid">Add</button>
+      </div>
+    </form>
+
+    <section class="help-card card">
+      <h2>Getting a brrr key</h2>
+      <ol>
+        <li>Install <strong>brrr</strong> from the App Store on the person’s iPhone and allow notifications.</li>
+        <li>In brrr, copy the webhook <strong>secret</strong> (it starts with <code>br_usr_</code>) or the whole webhook URL. Use the device’s own webhook to reach just that phone.</li>
+        <li>Paste it here, save, and tap <strong>Send test</strong>.</li>
+      </ol>
+      <p style="margin-top:8px">For the <strong>Critical</strong> alert level, Critical Alerts must also be allowed for brrr in the phone’s Settings.</p>
+    </section>
+  </div>
+
+  <script src="shared/schedule-core.js"></script>
+  <script src="common.js"></script>
+  <script src="people.js"></script>
+</body>
+</html>

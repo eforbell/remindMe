@@ -1,0 +1,13 @@
+# Every minute, a second after the minute. Reminders are on the quarter hour; running every minute means
+# a failed push is retried within a minute and the web process's own dispatcher has a backstop.
+[Unit]
+Description=Run the Remind Me dispatcher every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:01
+AccuracySec=1s
+Persistent=true
+Unit=remind-me-dispatch.service
+
+[Install]
+WantedBy=timers.target

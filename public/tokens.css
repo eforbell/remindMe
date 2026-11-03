@@ -1,0 +1,24 @@
+/* Sovereign tokens: Remind Me (indigo, with the icon's amber for "now") */
+:root {
+  --accent: #9198FF;
+  --accent-pale: rgba(145, 152, 255, 0.18);
+  --accent-wash: rgba(145, 152, 255, 0.06);
+  --accent-soft: rgba(145, 152, 255, 0.12);
+  --accent-soft-strong: rgba(145, 152, 255, 0.2);
+  --accent-border-soft: rgba(145, 152, 255, 0.32);
+  --accent-solid: #5A60D6;
+  --accent-solid-ink: #FFFFFF;
+  --amber: #FFB547;
+}
+
+:root[data-theme="light"] {
+  --accent: #4A4FC2;
+  --accent-pale: rgba(74, 79, 194, 0.14);
+  --accent-wash: rgba(74, 79, 194, 0.05);
+  --accent-soft: rgba(74, 79, 194, 0.1);
+  --accent-soft-strong: rgba(74, 79, 194, 0.18);
+  --accent-border-soft: rgba(74, 79, 194, 0.3);
+  --accent-solid: #4A4FC2;
+  --accent-solid-ink: #FFFFFF;
+  --amber: #D98A12;
+}
