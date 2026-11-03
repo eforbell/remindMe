@@ -2,6 +2,10 @@
 -- for running a self-hosted gateway side by side with brrr before relying on it. brrr stays the
 -- delivery of record: the mirror never changes a delivery's status, retries or timing.
 
+-- The ALTER below needs a brief exclusive lock on deliveries. Fail fast rather than queue live delivery
+-- traffic behind a long wait; the migration is retried at the next start (MIGRATE_ON_START, systemd restart).
+SET LOCAL lock_timeout = '5s';
+
 -- One mirror key per member, set from the People page. Like the brrr key, never selected into a response.
 CREATE TABLE member_mirror_channels (
   member_id      INT PRIMARY KEY REFERENCES family_members(id) ON DELETE CASCADE,

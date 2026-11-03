@@ -13,6 +13,7 @@ const mirror = require('../lib/mirror');
 
 const TZ = 'America/New_York';
 const BASE = 'http://127.0.0.1:9';
+const GW_ID = '0b9c2a1e-5f4d-4c3b-9a8e-7d6c5b4a3f21';
 const CONFIG = { giveUpMs: 12 * 3600 * 1000, retentionDays: 180, appPublicUrl: null, icon: null, mirrorUrl: BASE };
 const at = (iso) => new Date(iso);
 
@@ -40,7 +41,7 @@ function fakeMirror({ fail = () => false, delayMs = 0, status = 200 } = {}) {
       calls.push({ base, secret, payload });
       if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
       if (fail(calls.length)) throw new mirror.MirrorError('Could not reach the mirror gateway: ECONNREFUSED');
-      return { status, id: `gw-${calls.length}` };
+      return { status, id: `00000000-0000-4000-8000-${String(calls.length).padStart(12, '0')}` };
     },
   };
 }
@@ -81,9 +82,9 @@ test('mirrorUrl accepts http(s) bases only, without credentials or query', () =>
 test('send posts brrr-style with a Bearer header, returns the gateway id, redacts the secret', async () => {
   const seen = [];
   const ok = await mirror.send('http://gw', 'hp_usr_secret_123', { title: 't' }, {
-    fetchImpl: async (url, init) => { seen.push({ url, init }); return new Response(JSON.stringify({ id: 'abc', ok: true }), { status: 202 }); },
+    fetchImpl: async (url, init) => { seen.push({ url, init }); return new Response(JSON.stringify({ id: GW_ID, ok: true }), { status: 202 }); },
   });
-  assert.deepEqual(ok, { status: 202, id: 'abc' });
+  assert.deepEqual(ok, { status: 202, id: GW_ID });
   assert.equal(seen[0].url, 'http://gw/v1/send');
   assert.equal(seen[0].init.headers.Authorization, 'Bearer hp_usr_secret_123');
   assert.ok(!seen[0].url.includes('hp_usr_secret_123'));
@@ -109,7 +110,7 @@ test('each delivery is mirrored once, with the same payload, only for members wi
   const [sam, riley] = await rows();
   assert.equal(sam.status, 'sent');
   assert.equal(sam.mirror_status, 200);
-  assert.equal(sam.mirror_id, 'gw-1');
+  assert.equal(sam.mirror_id, '00000000-0000-4000-8000-000000000001');
   assert.ok(sam.mirror_done_at);
   assert.equal(riley.mirror_claimed_at, null);
 
@@ -195,8 +196,102 @@ test('test push goes to the mirror only and records the outcome', { skip: db.ski
   const people = await household({ mirrorFor: ['Sam'] });
   const mir = fakeMirror();
   const res = await members.testMirror(pool, people.Sam.id, { level: 'time-sensitive' }, { base: BASE, mirrorImpl: mir.mirrorImpl });
-  assert.deepEqual(res, { ok: true, status: 200, id: 'gw-1' });
+  assert.deepEqual(res, { ok: true, status: 200, id: '00000000-0000-4000-8000-000000000001' });
   assert.equal(mir.calls[0].payload.interruption_level, 'time-sensitive');
   await assert.rejects(members.testMirror(pool, people.Riley.id, {}, { base: BASE, mirrorImpl: mir.mirrorImpl }), /no mirror key/);
   await assert.rejects(members.testMirror(pool, people.Sam.id, {}, { base: null, mirrorImpl: mir.mirrorImpl }), /PUSH_MIRROR_URL/);
+});
+
+// ── Regressions from the PR #1 review ──────────────────────────────────────
+
+test('a gateway cannot get the secret stored or returned through its id or errors', async () => {
+  const secret = 'hp_usr_secret_abcdef123';
+  const echo = await mirror.send('http://gw', secret, {}, { fetchImpl: async () => new Response(JSON.stringify({ id: secret }), { status: 200 }) });
+  assert.equal(echo.id, null);
+  const partial = await mirror.send('http://gw', secret, {}, { fetchImpl: async () => new Response(JSON.stringify({ id: 'secret_abcdef1' }), { status: 200 }) });
+  assert.equal(partial.id, null, 'a piece of the secret is not an id either');
+  const odd = await mirror.send('http://gw', secret, {}, { fetchImpl: async () => new Response(JSON.stringify({ id: 'not an id!' }), { status: 200 }) });
+  assert.equal(odd.id, null);
+  await assert.rejects(
+    mirror.send('http://gw', secret, {}, { fetchImpl: async () => { throw Object.assign(new Error(`connect failed for ${secret}`), {}); } }),
+    (err) => !err.message.includes(secret) && err.message.includes('[secret]'),
+  );
+});
+
+test('slow mirrors do not hold up brrr batches (same sends with and without a mirror)', { skip: db.skip }, async () => {
+  const run = async (withMirror) => {
+    await db.reset(pool);
+    const people = [];
+    for (let i = 0; i < 11; i += 1) {
+      const m = await members.create(pool, { name: `P${i}` });
+      await members.setKey(pool, m.id, { key: `br_usr_p${i}_key_00001` });
+      await members.setMirrorKey(pool, m.id, { key: `hp_usr_p${i}_mirror_01` });
+      people.push(m);
+    }
+    await reminders.create(pool, {
+      text: 'Batch', date: '2026-11-03', time: '17:00', level: 'active',
+      recipients: people.map((p) => p.id), created_by: people[0].id,
+    }, { timezone: TZ, now: at('2026-11-03T15:00:00Z') });
+    const brrr = fakeBrrr();
+    const mir = fakeMirror({ delayMs: 300 });
+    await dispatcher.runPass(pool, {
+      source: 'test', now: () => at('2026-11-03T22:00:30Z'), sendImpl: brrr.sendImpl, mirrorImpl: mir.mirrorImpl,
+      config: { ...CONFIG, mirrorUrl: withMirror ? BASE : null }, budgetMs: 150,
+    });
+    return brrr.calls.length;
+  };
+  assert.equal(await run(false), 11);
+  assert.equal(await run(true), 11, 'mirroring must not cost a brrr send its place in the pass');
+});
+
+test('a locked mirror row delays only the mirror: brrr sends are still marked sent', { skip: db.skip }, async () => {
+  const people = await household({ mirrorFor: ['Sam', 'Riley'] });
+  await oneOff(people);
+  const blocker = await pool.connect();
+  try {
+    await blocker.query('BEGIN');
+    await blocker.query('SELECT * FROM member_mirror_channels FOR UPDATE'); // hold every mirror-channel row
+    const started = Date.now();
+    const quiet = { log() {}, error() {} };
+    const s = await dispatcher.runPass(pool, {
+      source: 'test', now: () => at('2026-11-03T22:00:30Z'), sendImpl: fakeBrrr().sendImpl, mirrorImpl: fakeMirror().mirrorImpl, config: CONFIG, log: quiet,
+    });
+    assert.equal(s.sent, 2);
+    assert.ok(Date.now() - started < 6000, 'the pass is not held by the lock');
+    for (const r of await rows()) assert.equal(r.status, 'sent');
+  } finally {
+    await blocker.query('ROLLBACK');
+    blocker.release();
+  }
+});
+
+test('migration 0002 gives up quickly instead of queueing live traffic behind its lock', { skip: db.skip }, async () => {
+  const fs = require('fs');
+  const path = require('path');
+  const sql = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrations', '0002_push_mirror.sql'), 'utf8');
+  const reader = await pool.connect();
+  const migrator = await pool.connect();
+  try {
+    // Undo 0002 so it can be re-applied, then hold a read lock on deliveries as live traffic would.
+    await pool.query('DROP TABLE member_mirror_channels');
+    await pool.query(`ALTER TABLE deliveries DROP COLUMN mirror_claimed_at, DROP COLUMN mirror_done_at, DROP COLUMN mirror_status,
+      DROP COLUMN mirror_id, DROP COLUMN mirror_error`);
+    await reader.query('BEGIN');
+    await reader.query('SELECT count(*) FROM deliveries');
+    await migrator.query('BEGIN');
+    const started = Date.now();
+    await assert.rejects(migrator.query(sql), /lock timeout/);
+    assert.ok(Date.now() - started < 8000);
+    await migrator.query('ROLLBACK');
+    await reader.query('ROLLBACK');
+    // With the reader gone it applies cleanly (and the schema is back for any later tests).
+    await migrator.query('BEGIN');
+    await migrator.query(sql);
+    await migrator.query('COMMIT');
+  } finally {
+    await reader.query('ROLLBACK').catch(() => {});
+    await migrator.query('ROLLBACK').catch(() => {});
+    reader.release();
+    migrator.release();
+  }
 });
