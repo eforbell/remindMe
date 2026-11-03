@@ -35,7 +35,7 @@ async function freshPool() {
 }
 
 async function reset(pool) {
-  await pool.query(`TRUNCATE deliveries, reminder_recipients, reminders, suggestions, member_notification_channels,
+  await pool.query(`TRUNCATE deliveries, reminder_recipients, reminders, suggestions, member_notification_channels, member_mirror_channels,
     family_members, app_config RESTART IDENTITY CASCADE`);
 }
 

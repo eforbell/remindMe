@@ -379,6 +379,8 @@ button:disabled { cursor: default; }
 .key-row { display: flex; gap: 8px; }
 .key-row input { flex: 1; min-width: 0; font-family: var(--font-mono); min-height: 48px; }
 .person-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* Optional mirror gateway (PUSH_MIRROR_URL): a quieter second row under the brrr key. */
+.mirror-block { padding-top: 12px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
 .person-error { font-size: var(--text-sm); color: var(--bad); overflow-wrap: anywhere; }
 .add-card { border-style: dashed; }
 .inline-form { display: flex; gap: 8px; }
