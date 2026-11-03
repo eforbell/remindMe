@@ -436,7 +436,16 @@
     if (c.freq === 'once') return new Set([c.date]);
     const monthStart = core.formatDate(y, m, 1);
     const monthEnd = core.formatDate(y, m, core.daysInMonth(y, m));
-    return new Set(seriesDates(400).filter((d) => d >= monthStart && d <= monthEnd));
+    // Walk the series up to the end of the shown month (however long it is), within its count.
+    const rule = currentRule();
+    const a = anchorDate();
+    const out = new Set();
+    let d = firstDate();
+    for (let n = 0; d && d <= monthEnd && (rule.count == null || n < rule.count) && n < 50000; n += 1) {
+      if (d >= monthStart) out.add(d);
+      d = core.nextOccurrenceDate(rule, a, d);
+    }
+    return out;
   }
 
   function renderCalendar() {

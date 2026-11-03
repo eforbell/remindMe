@@ -459,3 +459,28 @@ test('a first send in flight is not reported as a problem', { skip: db.skip }, a
   await pool.query("UPDATE deliveries SET status = 'sending', attempts = 1, claimed_at = now()");
   assert.deepEqual(await reminders.problems(pool, { now: at('2026-11-03T14:00:20Z') }), []);
 });
+
+test('editing a reminder while one of its people is being removed does not deadlock', { skip: db.skip }, async () => {
+  const [sam, riley] = await household(['Sam', 'Riley']);
+  const id = await reminders.create(pool, { text: 'Both', date: '2026-11-04', time: '09:00', recipients: [sam.id, riley.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const row = await reminderRow(id);
+  // An edit in progress holds the reminder row (what update() takes first) ...
+  const editor = await pool.connect();
+  try {
+    await editor.query('BEGIN');
+    await editor.query('SELECT id FROM reminders WHERE id = $1 FOR UPDATE', [id]);
+    // ... while Riley is being removed ...
+    const archiving = members.archive(pool, riley.id, { force: true });
+    await new Promise((r) => setTimeout(r, 150));
+    // ... and then the edit locks its people, as parseInput does. With the old lock order this deadlocked.
+    await editor.query('SELECT id FROM family_members WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE', [[sam.id, riley.id]]);
+    await editor.query('COMMIT');
+    const out = await archiving;
+    assert.equal(out.removedFrom, 1);
+  } finally {
+    editor.release();
+  }
+  assert.equal(row.status, 'active');
+  const [listed] = await reminders.list(pool, { now: at('2026-11-03T12:00:00Z') });
+  assert.deepEqual(listed.recipients.map((p) => p.name), ['Sam']);
+});

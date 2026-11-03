@@ -29,8 +29,10 @@ async function main() {
   const shutdown = async (signal) => {
     console.log(`${signal}: shutting down`);
     setTimeout(() => process.exit(0), 50000).unref(); // a pass is budgeted 45s
-    server.close();
-    await ticker?.stop();
+    // Stop taking requests and let the ones in progress finish, and let a dispatcher pass finish too.
+    const drained = new Promise((resolve) => server.close(resolve));
+    server.closeIdleConnections?.();
+    await Promise.all([drained, ticker?.stop()]);
     await pool.end().catch(() => {});
     process.exit(0);
   };

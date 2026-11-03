@@ -25,6 +25,7 @@ db/migrations/            numbered SQL; db/migrate.js applies them (advisory-loc
 
 ## Rules
 
+- Migrations are append-only: never edit one that has shipped; add `db/migrations/000N_*.sql`.
 - Times are quarter hours only, everywhere (DB CHECK, server validation, UI).
 - Wall-clock dates are `'YYYY-MM-DD'` strings end to end; `lib/db.js` stops pg from turning DATE into
   JS Dates. Never compute household dates with the device's local zone.
