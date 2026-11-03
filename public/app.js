@@ -214,7 +214,7 @@
       switch (d.status) {
         case 'sent': return `<span class="ds ds-ok">✓ ${esc(name)}, ${esc(when)}</span>`;
         case 'pending':
-        case 'sending': return d.attempts > 0
+        case 'sending': return d.last_error
           ? `<span class="ds ds-warn">↻ ${esc(name)}: retrying (${esc(d.last_error || 'send failed')})</span>`
           : `<span class="ds">… ${esc(name)}: sending</span>`;
         case 'failed': return `<span class="ds ds-bad">✕ ${esc(name)}: not delivered (${esc(d.last_error || 'failed')})</span>`;
@@ -308,6 +308,7 @@
       date: slot.date, time: slot.time,
       freq: 'once', every: 1, weekdays: new Set([core.weekdayOf(slot.date)]), weekdaysAuto: true,
       ends: 'after', count: core.DEFAULT_COUNTS.daily, level: state.config.default_level,
+      anchor: null, anchorFreq: null, anchorEvery: null, origDate: null, droppedNames: [],
     });
     const d = core.parseDate(c.date);
     c.calY = d.y; c.calM = d.m;
@@ -318,6 +319,10 @@
     Object.assign(c, {
       text: r.text,
       recipients: new Set(r.recipients.filter((p) => p.has_key).map((p) => p.id)),
+      droppedNames: asEdit ? r.recipients.filter((p) => !p.has_key).map((p) => p.name) : [],
+      anchor: rep.freq === 'once' ? null : r.start_date,
+      anchorFreq: rep.freq,
+      anchorEvery: rep.every || 1,
       time: r.time,
       freq: rep.freq,
       every: rep.every || 1,
@@ -326,11 +331,15 @@
       count: rep.freq === 'once' ? core.DEFAULT_COUNTS.daily : (rep.count ?? core.DEFAULT_COUNTS[rep.freq]),
     });
     if (asEdit) {
-      Object.assign(c, { mode: 'edit', id: r.id, version: r.version, date: r.next.date, startedSeries: r.fired_count > 0 });
+      Object.assign(c, { mode: 'edit', id: r.id, version: r.version, date: r.next.date, origDate: r.next.date, startedSeries: r.fired_count > 0 });
     } else {
-      // Schedule again: same pattern, the original count, starting at the next good slot.
-      const slot = nextSlotAt(r.time);
-      Object.assign(c, { date: slot.date, count: r.extend_by || c.count });
+      // Schedule again: the same pattern measured from the same anchor (so "monthly on the 31st" stays on
+      // the 31st), the original count, from its next date that is still ahead.
+      const rule = { freq: rep.freq, every: rep.every || 1, weekdays: rep.weekdays, count: null };
+      const n = now();
+      let date = rep.freq === 'once' ? nextSlotAt(r.time).date : core.nextOccurrenceDate(rule, r.start_date, core.addDays(n.date, -1));
+      if (rep.freq !== 'once' && date === n.date && isPast(date, r.time)) date = core.nextOccurrenceDate(rule, r.start_date, date);
+      Object.assign(c, { date, origDate: date, count: r.extend_by || c.count });
     }
     c.weekdays = new Set(rep.weekdays && rep.weekdays.length ? rep.weekdays : [core.weekdayOf(c.date)]);
     c.weekdaysAuto = !(rep.weekdays && rep.weekdays.length);
@@ -395,9 +404,10 @@
       </button>`;
     }).join('');
     const keyless = state.members.length - ok.length;
-    $('who-help').innerHTML = !ok.length
+    const dropped = c.droppedNames.length ? `${esc(c.droppedNames.join(', '))} no longer ${c.droppedNames.length === 1 ? 'has' : 'have'} a brrr key and ${c.droppedNames.length === 1 ? 'was' : 'were'} taken off. ` : '';
+    $('who-help').innerHTML = dropped + (!ok.length
       ? 'Nobody has a brrr key yet. <a href="people">Add one under People</a>.'
-      : keyless ? `People without a brrr key can’t be picked. <a href="people">Add keys</a>.` : '';
+      : keyless ? `People without a brrr key can’t be picked. <a href="people">Add keys</a>.` : '');
   }
 
   $('who-chips').addEventListener('click', (e) => {
@@ -424,18 +434,9 @@
 
   function seriesDatesInMonth(y, m) {
     if (c.freq === 'once') return new Set([c.date]);
-    const rule = currentRule();
+    const monthStart = core.formatDate(y, m, 1);
     const monthEnd = core.formatDate(y, m, core.daysInMonth(y, m));
-    const out = new Set();
-    let d = core.nextOccurrenceDate(rule, c.date, null);
-    let n = 0;
-    const limit = c.ends === 'never' ? 400 : c.count;
-    while (d && d <= monthEnd && n < limit) {
-      if (d >= core.formatDate(y, m, 1)) out.add(d);
-      d = core.nextOccurrenceDate(rule, c.date, d);
-      n += 1;
-    }
-    return out;
+    return new Set(seriesDates(400).filter((d) => d >= monthStart && d <= monthEnd));
   }
 
   function renderCalendar() {
@@ -562,6 +563,29 @@
     renderReadout();
   });
 
+  // The date the repeat pattern is measured from: the series' own anchor while the date and the kind of
+  // pattern are unchanged (editing a time keeps "the 31st"), otherwise the picked date. Mirrors the server.
+  function anchorDate() {
+    if (c.anchor && c.freq !== 'once' && c.freq === c.anchorFreq && c.every === c.anchorEvery && c.date === c.origDate) return c.anchor;
+    return c.date;
+  }
+
+  // The first reminder on or after the picked date, and the series from there.
+  function firstDate() {
+    const a = anchorDate();
+    return core.nextOccurrenceDate(currentRule(), a, a === c.date ? null : core.addDays(c.date, -1));
+  }
+
+  function seriesDates(limit) {
+    const rule = currentRule();
+    const a = anchorDate();
+    const out = [];
+    let d = firstDate();
+    const max = rule.count == null ? limit : Math.min(limit, rule.count);
+    while (d && out.length < max) { out.push(d); d = core.nextOccurrenceDate(rule, a, d); }
+    return out;
+  }
+
   function currentRule() {
     return {
       freq: c.freq,
@@ -586,8 +610,8 @@
     detail.classList.remove('hidden');
     const unit = UNIT[c.freq];
     const rule = currentRule();
-    const first = core.nextOccurrenceDate(rule, c.date, null);
-    const last = rule.count != null ? core.lastOccurrenceDate(rule, c.date) : null;
+    const first = firstDate();
+    const last = rule.count != null ? seriesDates(rule.count).pop() : null;
     const today = now().date;
     const weekdayRow = c.freq === 'weekly' ? `
       <div class="weekday-row" role="group" aria-label="On these days">
@@ -663,21 +687,21 @@
   function problem() {
     if (!c.text.trim()) return { msg: 'Say what the reminder is for.', focus: 'what' };
     if (!c.recipients.size) return { msg: reachable().length ? 'Pick who to remind.' : 'Add a brrr key under People first.', focus: 'who-chips' };
-    const first = core.nextOccurrenceDate(currentRule(), c.date, null);
+    const first = firstDate();
     if (!first || isPast(first, c.time)) return { msg: 'That time has passed. Pick a later one.', focus: 'timepicker' };
     return null;
   }
 
   function renderReadout() {
     const today = now().date;
-    const first = core.nextOccurrenceDate(currentRule(), c.date, null) || c.date;
+    const first = firstDate() || c.date;
     $('when-readout').textContent = RM.whenText(first, c.time, today);
     const who = [...c.recipients].map(memberById).filter(Boolean);
     const level = LEVEL[c.level]?.label || '';
     const parts = [];
     parts.push(who.length ? `Remind ${peopleText(who)}` : 'Remind …');
     parts.push(RM.whenText(first, c.time, today));
-    if (c.freq !== 'once') parts.push(core.describeRepeat(currentRule(), c.date).replace(/^./, (x) => x.toLowerCase()));
+    if (c.freq !== 'once') parts.push(core.describeRepeat(currentRule(), anchorDate()).replace(/^./, (x) => x.toLowerCase()));
     parts.push(level.toLowerCase());
     $('composer-summary').innerHTML = `${c.text.trim() ? `<strong>${esc(c.text.trim())}</strong><br>` : ''}${esc(parts.join(' · '))}`;
     const p = problem();
@@ -866,6 +890,7 @@
       repeat: currentRule(),
       created_by: RM.getMe(),
     };
+    if (c.mode !== 'edit' && anchorDate() !== c.date) body.anchor = anchorDate();
     const btn = $('schedule-btn');
     btn.disabled = true;
     try {
@@ -875,13 +900,18 @@
         await api('api/reminders', { method: 'POST', body });
       }
       closeSheet($('composer'));
-      const first = core.nextOccurrenceDate(currentRule(), c.date, null);
+      const first = firstDate();
       toast(`${c.mode === 'edit' ? 'Saved' : 'Scheduled'}: ${RM.whenText(first, c.time, now().date)}`);
       await load();
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove('hidden');
-      if (err.code === 'stale' || err.code === 'not_found' || err.code === 'finished') load();
+      if (err.code === 'stale' || err.code === 'not_found' || err.code === 'finished') {
+        await load();
+        // Take the fresh version so the next Save compares against what is there now.
+        const fresh = state.reminders.find((r) => r.id === c.id);
+        if (fresh) c.version = fresh.version;
+      }
     } finally {
       btn.disabled = false;
     }

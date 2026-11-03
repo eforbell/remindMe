@@ -46,8 +46,11 @@ CREATE TABLE reminders (
   weekdays              SMALLINT[] CHECK (weekdays IS NULL OR (cardinality(weekdays) BETWEEN 1 AND 7 AND weekdays <@ ARRAY[0,1,2,3,4,5,6]::SMALLINT[])),
   max_occurrences       INT CHECK (max_occurrences IS NULL OR max_occurrences BETWEEN 1 AND 100000),
   extend_by             INT NOT NULL DEFAULT 1 CHECK (extend_by BETWEEN 1 AND 1000),
-  -- The cursor: how many occurrences have passed, and the next one (NULL once the series is over).
+  -- The cursor: how many occurrences of the current series have passed, and the next one (NULL once the
+  -- series is over). occurrence_seq numbers every occurrence the reminder has ever had and never goes
+  -- back, so a series restarted by an edit can't collide with delivery rows it already has.
   fired_count           INT NOT NULL DEFAULT 0,
+  occurrence_seq        INT NOT NULL DEFAULT 0,
   next_fire_date        DATE,
   next_fire_at          TIMESTAMPTZ,
   last_fired_at         TIMESTAMPTZ,
@@ -70,7 +73,7 @@ CREATE TABLE reminder_recipients (
 );
 CREATE INDEX reminder_recipients_member ON reminder_recipients (member_id);
 
--- One row per (occurrence, recipient). The unique key makes recording an occurrence idempotent, and the
+-- One row per (occurrence, recipient); occurrence_no is the reminder's occurrence_seq at that occurrence. The unique key makes recording an occurrence idempotent, and the
 -- row carries a snapshot of what to send, so retries do not depend on later edits.
 CREATE TABLE deliveries (
   id               BIGSERIAL PRIMARY KEY,
@@ -83,6 +86,7 @@ CREATE TABLE deliveries (
   attempts         INT NOT NULL DEFAULT 0,
   next_attempt_at  TIMESTAMPTZ,
   claimed_at       TIMESTAMPTZ,
+  claim_token      UUID,         -- set per claim; only the holder of the current claim may finish the row
   give_up_at       TIMESTAMPTZ NOT NULL,
   sent_at          TIMESTAMPTZ,
   response_status  INT,

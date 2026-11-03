@@ -284,3 +284,178 @@ test('old finished rows are pruned after the retention period', { skip: db.skip 
   const again = await pass(at('2026-11-03T14:05:10Z'), fakeSender());
   assert.equal(again.pruned, null, 'pruning runs at most every 6 hours');
 });
+
+// ── Regressions from review ─────────────────────────────────────────────────
+
+test('restarting a series that already fired keeps delivering (occurrence numbers never repeat)', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  const id = await reminders.create(pool, {
+    text: 'Daily', date: '2026-11-03', time: '09:00', recipients: [sam.id], repeat: { freq: 'daily', count: null },
+  }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const sender = fakeSender();
+  for (const day of ['03', '04', '05']) await pass(at(`2026-11-${day}T14:00:10Z`), sender);
+  assert.equal(sender.calls.length, 3);
+  const row = await reminderRow(id);
+  // Change the time: the series restarts from tomorrow at 9:15.
+  await reminders.update(pool, id, {
+    text: 'Daily', date: '2026-11-06', time: '09:15', recipients: [sam.id], repeat: { freq: 'daily', count: null }, version: row.version,
+  }, { timezone: TZ, now: at('2026-11-05T20:00:00Z') });
+  for (const day of ['06', '07', '08', '09']) await pass(at(`2026-11-${day}T14:15:10Z`), sender);
+  assert.equal(sender.calls.length, 7, 'all four days after the restart were sent');
+});
+
+test('a dispatcher that lost its claim cannot overwrite the result of the one that took over', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await reminders.create(pool, { text: 'Stall', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const t0 = at('2026-11-03T14:00:10Z');
+  let release;
+  const stalled = new Promise((resolve) => { release = resolve; });
+  const slow = { sendImpl: async () => { await stalled; throw new Error('brrr answered 503'); } };
+  const passA = pass(t0, slow);
+  // Wait until A has claimed the row, then age its claim and let B take over and succeed.
+  for (let i = 0; i < 50; i += 1) {
+    const [d] = await deliveries();
+    if (d && d.status === 'sending') break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  await pool.query("UPDATE deliveries SET claimed_at = claimed_at - interval '6 minutes'");
+  const b = fakeSender();
+  await pass(minutes(t0, 6), b);
+  assert.equal(b.calls.length, 1);
+  release();
+  const a = await passA;
+  assert.equal(a.lost, 1, 'A noticed it no longer held the claim');
+  const [d] = await deliveries();
+  assert.equal(d.status, 'sent', 'B’s result stands');
+  assert.equal(d.last_error, null);
+});
+
+test('when a newer occurrence is recorded, an older one still retrying is superseded, not sent too', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await reminders.create(pool, {
+    text: 'Pills', date: '2026-11-03', time: '09:00', recipients: [sam.id], repeat: { freq: 'daily', count: null },
+  }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const config = { ...CONFIG, giveUpMs: 72 * 3600 * 1000 };
+  await pass(at('2026-11-03T14:00:10Z'), fakeSender({ fail: () => true }), { config });
+  // Down until Thursday morning: Tuesday's retry is still pending when Thursday's is recorded.
+  const sender = fakeSender();
+  await pass(at('2026-11-05T14:00:10Z'), sender, { config });
+  assert.equal(sender.calls.length, 1, 'only the latest');
+  const ds = await deliveries();
+  assert.deepEqual(ds.map((d) => [d.occurrence_no, d.status]), [[0, 'missed'], [1, 'missed'], [2, 'sent']]);
+  assert.match(ds[0].last_error, /Superseded/);
+});
+
+test('removing a person waits for a reminder being saved for them, then takes them off it', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // What reminders.create holds while it saves: the recipient row FOR SHARE.
+    await client.query('SELECT id FROM family_members WHERE id = $1 FOR SHARE', [sam.id]);
+    const { rows } = await client.query(
+      `INSERT INTO reminders (text, level, timezone, start_date, time_of_day, freq, max_occurrences, next_fire_date, next_fire_at)
+       VALUES ('Racy', 'active', $1, '2026-11-04', '09:00', 'once', 1, '2026-11-04', '2026-11-04T14:00:00Z') RETURNING id`, [TZ]);
+    await client.query('INSERT INTO reminder_recipients (reminder_id, member_id) VALUES ($1, $2)', [rows[0].id, sam.id]);
+    let settled = false;
+    const archiving = members.archive(pool, sam.id, { force: true }).then((r) => { settled = true; return r; });
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(settled, false, 'archive waits for the save');
+    await client.query('COMMIT');
+    const out = await archiving;
+    assert.equal(out.removedFrom, 1);
+    assert.equal((await reminderRow(rows[0].id)).status, 'deleted');
+  } finally {
+    client.release();
+  }
+});
+
+test('editing only the time keeps "monthly on the 31st" on the 31st', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  const id = await reminders.create(pool, {
+    text: 'Rent', date: '2027-01-31', time: '09:00', recipients: [sam.id], repeat: { freq: 'monthly', count: 6 },
+  }, { timezone: TZ, now: at('2027-01-01T12:00:00Z') });
+  await pass(at('2027-01-31T14:00:10Z'), fakeSender());
+  let row = await reminderRow(id);
+  assert.equal(row.next_fire_date, '2027-02-28');
+  await reminders.update(pool, id, {
+    text: 'Rent', date: '2027-02-28', time: '10:00', recipients: [sam.id], repeat: { freq: 'monthly', count: 5 }, version: row.version,
+  }, { timezone: TZ, now: at('2027-02-01T12:00:00Z') });
+  row = await reminderRow(id);
+  assert.equal(row.start_date, '2027-01-31', 'the anchor is kept');
+  assert.equal(row.next_fire_date, '2027-02-28');
+  const [listed] = await reminders.list(pool, { now: at('2027-02-01T12:00:00Z') });
+  assert.equal(listed.describe, 'Monthly on the 31st (or the month’s last day), 5 times');
+  await pass(at('2027-02-28T15:00:10Z'), fakeSender());
+  assert.equal((await reminderRow(id)).next_fire_date, '2027-03-31');
+});
+
+test('"schedule again" can keep the original anchor day', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  const id = await reminders.create(pool, {
+    text: 'Rent', date: '2027-04-01', anchor: '2027-01-31', time: '09:00', recipients: [sam.id], repeat: { freq: 'monthly', count: 3 },
+  }, { timezone: TZ, now: at('2027-03-20T12:00:00Z') });
+  const row = await reminderRow(id);
+  assert.equal(row.next_fire_date, '2027-04-30');
+  assert.equal(row.start_date, '2027-01-31', 'the anchor is stored, so later months stay on the 31st');
+  await pass(at('2027-04-30T13:00:10Z'), fakeSender());
+  assert.equal((await reminderRow(id)).next_fire_date, '2027-05-31');
+  await assert.rejects(reminders.create(pool, {
+    text: 'Bad', date: '2027-04-01', anchor: '2027-05-01', time: '09:00', recipients: [sam.id], repeat: { freq: 'monthly', count: 3 },
+  }, { timezone: TZ, now: at('2027-03-20T12:00:00Z') }), /anchor/);
+});
+
+test('a text-only edit keeps "Add N more" at the original run length', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  const id = await reminders.create(pool, {
+    text: 'Typo', date: '2026-11-03', time: '09:00', recipients: [sam.id], repeat: { freq: 'daily', count: 30 },
+  }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const row = await reminderRow(id);
+  await reminders.update(pool, id, {
+    text: 'Fixed', date: row.next_fire_date, time: '09:00', recipients: [sam.id], repeat: { freq: 'daily', count: 1 }, version: row.version,
+  }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  assert.equal((await reminderRow(id)).extend_by, 30);
+});
+
+test('"ending soon" follows the time to the last reminder, not the count left', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  const now = at('2026-11-03T12:00:00Z');
+  await reminders.create(pool, { text: 'Yearly', date: '2026-12-01', time: '09:00', recipients: [sam.id], repeat: { freq: 'yearly', count: 2 } }, { timezone: TZ, now });
+  await reminders.create(pool, { text: 'Soon', date: '2026-11-04', time: '09:00', recipients: [sam.id], repeat: { freq: 'daily', count: 2 } }, { timezone: TZ, now });
+  const list = await reminders.list(pool, { now });
+  assert.equal(list.find((r) => r.text === 'Yearly').ending_soon, false);
+  assert.equal(list.find((r) => r.text === 'Soon').ending_soon, true);
+});
+
+test('a push that only gets through on a late retry says it was due', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await reminders.create(pool, { text: 'Retry late', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  await pass(at('2026-11-03T14:00:10Z'), fakeSender({ fail: () => true }));
+  const sender = fakeSender();
+  await pool.query("UPDATE deliveries SET next_attempt_at = '2026-11-03T14:30:00Z'");
+  await pass(at('2026-11-03T14:30:10Z'), sender);
+  assert.equal(sender.calls[0].payload.message, 'Was due 9:00 AM');
+});
+
+test('one reminder that cannot be recorded does not block the others', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await pool.query(
+    `INSERT INTO reminders (text, level, timezone, start_date, time_of_day, freq, max_occurrences, next_fire_date, next_fire_at)
+     VALUES ('Poison', 'active', 'Mars/Olympus', '2026-11-03', '09:00', 'daily', NULL, '2026-11-03', '2026-11-03T13:00:00Z')`);
+  await pool.query('INSERT INTO reminder_recipients (reminder_id, member_id) SELECT max(id), $1 FROM reminders', [sam.id]);
+  await reminders.create(pool, { text: 'Healthy', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const sender = fakeSender();
+  const logged = [];
+  const s = await pass(at('2026-11-03T14:00:10Z'), sender, { log: { error: (m) => logged.push(m), log: () => {} } });
+  assert.equal(s.recordErrors, 1);
+  assert.deepEqual(sender.calls.map((c) => c.payload.title), ['Healthy']);
+  assert.match(logged[0], /could not be recorded/);
+});
+
+test('a first send in flight is not reported as a problem', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await reminders.create(pool, { text: 'Inflight', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  await pass(at('2026-11-03T14:00:10Z'), fakeSender(), { budgetMs: 0 });
+  await pool.query("UPDATE deliveries SET status = 'sending', attempts = 1, claimed_at = now()");
+  assert.deepEqual(await reminders.problems(pool, { now: at('2026-11-03T14:00:20Z') }), []);
+});

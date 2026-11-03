@@ -25,6 +25,8 @@
   };
   const MONTH_RE = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
   const PARTS_OF_DAY = { morning: '08:00', afternoon: '15:00', evening: '18:00', night: '21:00', tonight: '20:00' };
+  // A part of the day also settles AM/PM for a bare hour: "tomorrow morning at 7" is 7 AM.
+  const PART_IS_PM = { morning: false, afternoon: true, evening: true, night: true, tonight: true };
   const EVERYONE = new Set(['everyone', 'everybody', 'all', 'us', 'all of us', 'the family', 'the household']);
 
   function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
@@ -67,6 +69,11 @@
     const out = { text: '', recipients: null, date: null, time: null, repeat: null, notes: [], found: [] };
     let pmHint = null; // true: a bare "at 7" means PM; false: AM
     let partTime = null;
+    const setPart = (word) => {
+      const key = String(word).toLowerCase();
+      partTime = PARTS_OF_DAY[key];
+      pmHint = PART_IS_PM[key];
+    };
 
     const take = (re, fn) => {
       const m = re.exec(s);
@@ -87,7 +94,7 @@
 
     // 2 · How often
     take(/\b(?:every\s*day|daily|each\s+day)\b/i, () => { out.repeat = { freq: 'daily', every: 1 }; });
-    if (!out.repeat) take(/\bevery\s+(morning|afternoon|evening|night)\b/i, (m) => { out.repeat = { freq: 'daily', every: 1 }; partTime = PARTS_OF_DAY[m[1].toLowerCase()]; });
+    if (!out.repeat) take(/\bevery\s+(morning|afternoon|evening|night)\b/i, (m) => { out.repeat = { freq: 'daily', every: 1 }; setPart(m[1]); });
     if (!out.repeat) take(/\b(?:every\s+weekday|on\s+weekdays|weekdays)\b/i, () => { out.repeat = { freq: 'weekly', every: 1, weekdays: [1, 2, 3, 4, 5] }; });
     if (!out.repeat) take(/\b(?:every\s+weekend|on\s+weekends|weekends)\b/i, () => { out.repeat = { freq: 'weekly', every: 1, weekdays: [0, 6] }; });
     if (!out.repeat) {
@@ -137,9 +144,9 @@
     // 4 · Dates
     if (!out.date) {
       take(/\b(?:the\s+)?day\s+after\s+tomorrow\b/i, () => { out.date = core.addDays(today, 2); });
-      if (!out.date) take(/\b(?:tomorrow|tmrw|tmr)(?:\s+(morning|afternoon|evening|night))?\b/i, (m) => { out.date = core.addDays(today, 1); if (m[1]) partTime = PARTS_OF_DAY[m[1].toLowerCase()]; });
-      if (!out.date) take(/\btonight\b/i, () => { out.date = today; pmHint = true; partTime = PARTS_OF_DAY.tonight; });
-      if (!out.date) take(/\b(?:today|this\s+(morning|afternoon|evening))\b/i, (m) => { out.date = today; if (m[1]) partTime = PARTS_OF_DAY[m[1].toLowerCase()]; });
+      if (!out.date) take(/\b(?:tomorrow|tmrw|tmr)(?:\s+(morning|afternoon|evening|night))?\b/i, (m) => { out.date = core.addDays(today, 1); if (m[1]) setPart(m[1]); });
+      if (!out.date) take(/\btonight\b/i, () => { out.date = today; setPart('tonight'); });
+      if (!out.date) take(/\b(?:today|this\s+(morning|afternoon|evening))\b/i, (m) => { out.date = today; if (m[1]) setPart(m[1]); });
       if (!out.date && !(out.repeat && out.repeat.freq === 'weekly' && out.repeat.weekdays)) {
         // Short names (sat, sun, wed…) need next/this before them, or "on" before and a time or the end
         // after, so "put on sun screen" stays text.
@@ -150,7 +157,7 @@
           // The same weekday as today means a week out, unless they said "this".
           if (diff === 0 && (m[1] || '').toLowerCase() !== 'this') diff = 7;
           out.date = core.addDays(today, diff);
-          if (m[5]) partTime = PARTS_OF_DAY[m[5].toLowerCase()];
+          if (m[5]) setPart(m[5]);
           return true;
         });
       }

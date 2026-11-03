@@ -116,3 +116,11 @@ test('plain text passes through, trimmed and capitalized', () => {
   assert.equal(r.text, 'Water the plants');
   assert.deepEqual(r.found, []);
 });
+
+test('a part of the day settles AM or PM for a bare hour', () => {
+  assert.equal(p('run tomorrow morning at 7').time, '07:00');
+  assert.equal(p('read tomorrow evening at 9').time, '21:00');
+  assert.equal(p('stretch every morning at 6:30').time, '06:30');
+  assert.equal(p('call this afternoon at 2').time, '14:00');
+  assert.equal(p('alarm tomorrow morning at 7pm').time, '19:00', 'an explicit pm wins');
+});

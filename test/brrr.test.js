@@ -67,3 +67,13 @@ test('iconUrl only accepts http(s)', () => {
   assert.equal(brrr.iconUrl('javascript:alert(1)'), null);
   assert.equal(brrr.iconUrl(''), null);
 });
+
+test('a secret echoed across the truncation point is still redacted', async () => {
+  const secret = 'br_usr_' + 'z'.repeat(40);
+  const echo = async () => ({ ok: false, status: 400, text: async () => `${'x'.repeat(185)}${secret}` });
+  await assert.rejects(brrr.send(secret, {}, { fetchImpl: echo }), (err) => {
+    assert.equal(err.message.includes(secret.slice(0, 10)), false);
+    assert.match(err.message, /\[secret\]|x{20}/);
+    return true;
+  });
+});

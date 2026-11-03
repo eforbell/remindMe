@@ -26,11 +26,13 @@ async function main() {
   });
   const ticker = IN_PROCESS_DISPATCH ? dispatcher.startTicker(pool) : null;
 
-  const shutdown = (signal) => {
+  const shutdown = async (signal) => {
     console.log(`${signal}: shutting down`);
-    ticker?.stop();
-    server.close(() => pool.end().finally(() => process.exit(0)));
-    setTimeout(() => process.exit(0), 8000).unref();
+    setTimeout(() => process.exit(0), 50000).unref(); // a pass is budgeted 45s
+    server.close();
+    await ticker?.stop();
+    await pool.end().catch(() => {});
+    process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
