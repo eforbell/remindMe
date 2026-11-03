@@ -10,10 +10,21 @@ require('dotenv').config();
 const { createPool } = require('../lib/db');
 const dispatcher = require('../lib/dispatcher');
 
+// systemd stops this unit with SIGTERM (e.g. at shutdown). Without a handler Node would exit at once, which
+// could fall between brrr accepting a push and the row being marked sent. Instead: claim no new batch,
+// let the one in flight finish (bounded by the send timeout), then exit normally.
+let stopping = false;
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    if (!stopping) console.log(`${signal}: finishing the batch in flight, then exiting`);
+    stopping = true;
+  });
+}
+
 async function main() {
   const pool = createPool();
   try {
-    const summary = await dispatcher.runPass(pool, { source: 'timer' });
+    const summary = await dispatcher.runPass(pool, { source: 'timer', shouldStop: () => stopping });
     if (summary.reminders || summary.sent || summary.retry || summary.failed || summary.missed || summary.pruned) {
       console.log(JSON.stringify(summary));
     }

@@ -295,3 +295,63 @@ test('migration 0002 gives up quickly instead of queueing live traffic behind it
     migrator.release();
   }
 });
+
+// ── Regressions from round 2 ───────────────────────────────────────────────
+
+test('mirror requests never follow redirects', async () => {
+  let init;
+  await mirror.send('http://gw', 'hp_usr_secret_abcdef123', {}, {
+    fetchImpl: async (_url, i) => { init = i; return new Response('{}', { status: 200 }); },
+  });
+  assert.equal(init.redirect, 'error');
+});
+
+test('a locked mirror-channel row never holds the delivery row brrr is marking sent', { skip: db.skip }, async () => {
+  const people = await household({ mirrorFor: ['Sam'] });
+  await oneOff(people);
+  const blocker = await pool.connect();
+  try {
+    await blocker.query('BEGIN');
+    await blocker.query('SELECT * FROM member_mirror_channels FOR UPDATE');
+    // The mirror answers instantly, so its outcome write reaches Sam's delivery row before brrr (50 ms)
+    // marks it sent. Look at what is actually committed 400 ms in, from another connection: both rows
+    // must already be 'sent', not stuck behind the mirror waiting out its 1 s lock_timeout.
+    const brrr = { sendImpl: async () => { await new Promise((r) => setTimeout(r, 50)); return { status: 200 }; } };
+    const passDone = dispatcher.runPass(pool, {
+      source: 'test', now: () => at('2026-11-03T22:00:30Z'), sendImpl: brrr.sendImpl, mirrorImpl: fakeMirror().mirrorImpl,
+      config: CONFIG, log: { log() {}, error() {} },
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const { rows: early } = await pool.query("SELECT count(*)::int AS n FROM deliveries WHERE status = 'sent'");
+    await passDone;
+    assert.equal(early[0].n, 2, 'both brrr sends committed as sent within 400 ms');
+  } finally {
+    await blocker.query('ROLLBACK');
+    blocker.release();
+  }
+});
+
+test('once shutdown begins, no new batch is claimed; the batch in flight finishes', { skip: db.skip }, async () => {
+  await db.reset(pool);
+  const people = [];
+  for (let i = 0; i < 25; i += 1) {
+    const m = await members.create(pool, { name: `Q${i}` });
+    await members.setKey(pool, m.id, { key: `br_usr_q${i}_key_00001` });
+    people.push(m);
+  }
+  // Recipients per reminder are capped, so spread 25 people over two reminders due at the same time.
+  for (const group of [people.slice(0, 13), people.slice(13)]) {
+    await reminders.create(pool, {
+      text: 'Many', date: '2026-11-03', time: '17:00', level: 'active', recipients: group.map((p) => p.id), created_by: people[0].id,
+    }, { timezone: TZ, now: at('2026-11-03T15:00:00Z') });
+  }
+  let stopping = false;
+  const brrr = { sendImpl: async () => { stopping = true; await new Promise((r) => setTimeout(r, 30)); return { status: 200 }; } };
+  const s = await dispatcher.runPass(pool, {
+    source: 'test', now: () => at('2026-11-03T22:00:30Z'), sendImpl: brrr.sendImpl, config: { ...CONFIG, mirrorUrl: null },
+    shouldStop: () => stopping,
+  });
+  assert.equal(s.sent, 10, 'only the first batch (10) went out');
+  const { rows } = await pool.query("SELECT status, count(*)::int AS n FROM deliveries GROUP BY status ORDER BY status");
+  assert.deepEqual(rows, [{ status: 'pending', n: 15 }, { status: 'sent', n: 10 }], 'nothing is left half-sent');
+});
