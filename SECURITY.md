@@ -11,8 +11,8 @@ people. Do not expose it to the internet.
   push notifications to that person's phone.
 - The API never returns a secret, only `••••` and its last four characters. Secrets are not logged.
   Delivery rows store the payload, never the secret.
-- Pushes send the secret in an `Authorization: Bearer` header to `https://api.brrr.now/v1/send`, never in
-  a URL. Pasted webhook URLs are accepted only for `https://api.brrr.now/v1/…`; the app never posts
+- Pushes send the secret in an `Authorization: Bearer` header to `<PUSH_BASE_URL>/v1/send` (by default
+  `https://api.brrr.now/v1/send`), never in a URL. Pasted webhook URLs are accepted only for that service; the app never posts
   anywhere else.
 - Removing a person erases their secret.
 
