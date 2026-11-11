@@ -88,7 +88,8 @@ Without `TEST_DATABASE_URL`, the database tests are skipped and the pure ones st
 | `DATABASE_URL` | required | PostgreSQL connection string |
 | `PORT` / `HOST` | `3013` / `127.0.0.1` | Loopback unless you mean to expose it |
 | `HOUSEHOLD_TIMEZONE` | `America/New_York` | IANA zone that reminder times are in |
-| `APP_PUBLIC_URL` | empty | Tap-through link in each push |
+| `APP_PUBLIC_URL` | empty | This app's address; used as the tap-through link only when `TAP_OPENS_APP=true` |
+| `TAP_OPENS_APP` | `false` | Tapping a push opens the app. Off by default, so Home Push shows the reminder itself instead |
 | `BRRR_ICON_URL` | empty | Notification icon. Must be publicly reachable, not a tailnet URL |
 | `DELIVERY_GIVE_UP_HOURS` | `12` | How long a failing push keeps retrying (0.25 to 72) |
 | `RETENTION_DAYS` | `180` | Finished reminders and delivery history are pruned after this |
