@@ -484,3 +484,12 @@ test('editing a reminder while one of its people is being removed does not deadl
   const [listed] = await reminders.list(pool, { now: at('2026-11-03T12:00:00Z') });
   assert.deepEqual(listed.recipients.map((p) => p.name), ['Sam']);
 });
+
+test('the tap-through link is off unless TAP_OPENS_APP=true', () => {
+  const url = 'https://home.example.ts.net/remind/';
+  assert.equal(dispatcher.defaultConfig({ APP_PUBLIC_URL: url }).appPublicUrl, null);
+  assert.equal(dispatcher.defaultConfig({ APP_PUBLIC_URL: url, TAP_OPENS_APP: 'false' }).appPublicUrl, null);
+  assert.equal(dispatcher.defaultConfig({ APP_PUBLIC_URL: url, TAP_OPENS_APP: 'true' }).appPublicUrl, url);
+  assert.equal(dispatcher.defaultConfig({ APP_PUBLIC_URL: url, TAP_OPENS_APP: ' TRUE ' }).appPublicUrl, url);
+  assert.equal(dispatcher.defaultConfig({ TAP_OPENS_APP: 'true' }).appPublicUrl, null);
+});
