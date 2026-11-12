@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#141310">
+  <meta name="format-detection" content="telephone=no">
+  <title>Who is who · Remind Me</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="sovereign-fonts.css">
+  <link rel="stylesheet" href="sovereign-chassis.css">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="remind-skin.css">
+  <style>
+    .link-select { width: 100%; min-height: 48px; font-size: 16px; }
+    .link-done { display: flex; justify-content: flex-end; margin-top: 12px; }
+  </style>
+  <script src="theme.js"></script>
+</head>
+<body class="page-people">
+  <div id="app">
+    <header class="topbar">
+      <span></span>
+      <div class="topbar-actions"><button type="button" class="icon-btn" data-theme-toggle aria-label="Theme"></button></div>
+    </header>
+
+    <h1 class="page-title">Who is who</h1>
+    <p class="page-sub">Remind Me now knows people by their household account in Home Base. Match each person here to
+      the account they use. Anyone you leave unlinked is asked to find a parent when they open Remind Me.</p>
+    <p class="person-status" id="link-status" role="status" aria-live="polite">Loading household members…</p>
+
+    <div class="person-list" id="link-rows" style="margin-top:12px"></div>
+
+    <div class="link-done hidden" id="link-done-card"><a class="btn-solid" href="./" id="link-done">Open Remind Me</a></div>
+  </div>
+
+  <script src="shared/schedule-core.js"></script>
+  <script src="common.js"></script>
+  <script src="link.js"></script>
+</body>
+</html>

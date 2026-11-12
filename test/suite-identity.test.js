@@ -36,6 +36,11 @@ class MembersDb {
       return { rows: this.live().filter((row) => row.suite_member_id === params[0]).map(({ id, name }) => ({ id, name })) };
     }
     if (sql.includes('count(*)::int AS n FROM family_members WHERE archived_at IS NULL')) return { rows: [{ n: this.live().length }] };
+    if (sql.includes('FROM family_members WHERE archived_at IS NULL ORDER BY id')) return { rows: this.live().map(({ id, name, suite_member_id }) => ({ id, name, suite_member_id })) };
+    if (sql.startsWith('UPDATE family_members SET suite_member_id = $1 WHERE id = $2')) {
+      const row = this.live().find((candidate) => candidate.id === params[1] && params[0] === null);
+      return { rows: row ? [{ id: row.id, name: row.name, suite_member_id: null }] : [] };
+    }
     if (sql.includes('FROM family_members m')) return { rows: this.live().map(({ id, name }) => ({ id, name, has_key: false })) };
     if (sql.includes('INSERT INTO family_members (name)')) {
       const row = { id: this.rows.length + 1, name: params[0], suite_member_id: null };
@@ -258,13 +263,10 @@ test('a parent nobody has linked reaches the link page and setup, and nothing ab
       assert.equal(res.status, 403, `${method} ${path}`);
       assert.equal(res.json().code, 'not_linked', `${method} ${path}`);
     }
-    // Admitted: the link page, its list and a link route (none of them a 303 or the gate's 403).
-    for (const path of ['/link', '/api/suite/links']) {
-      const res = await get(path);
-      assert.ok(res.status !== 303 && res.status !== 403, `${path}: ${res.status}`);
-    }
+    // Admitted: the link page, its list and a link route (test/suite-links.test.js covers what they do).
+    for (const path of ['/link', '/api/suite/links']) assert.equal((await get(path)).status, 200, path);
     const linkRoute = await call('PUT', '/api/suite/links/1', { ...PARENT_HEADERS, ...JSON_WRITE }, '{"suite_member_id":null}');
-    assert.ok(linkRoute.status !== 403 || linkRoute.json().code !== 'not_linked', `link route: ${linkRoute.status}`);
+    assert.equal(linkRoute.status, 200);
     // Setup redirects home once a household exists; the gate then sends them to the link page.
     assert.equal((await get('/setup')).headers.location, './');
     // Setup's status says only whether a household is still needed: no names, no counts.
