@@ -5,6 +5,7 @@
   const { esc, api, avatar, toast, confirmSheet } = RM;
   const $ = (id) => document.getElementById(id);
   let members = [];
+  const pushRegistrationRequests = new Map();
   let mirrorEnabled = false; // the server has a mirror gateway (PUSH_MIRROR_URL)
   const editing = new Set(); // people whose key field is open
   const editingMirror = new Set(); // people whose mirror key field is open
@@ -142,14 +143,17 @@
     if (!key) { input.focus(); return; }
     const btn = form.querySelector('button');
     btn.disabled = true;
+    const verificationRequest = Symbol();
+    pushRegistrationRequests.set(id, verificationRequest);
     try {
       const saved = await api(`api/members/${id}/brrr`, { method: 'PUT', body: { key } });
+      if (pushRegistrationRequests.get(id) !== verificationRequest) return;
       input.value = '';
       editing.delete(id);
       await load();
-      document.getElementById(`push-check-${id}`).textContent = `Saved. ${saved.verification.message}`;
+      if (pushRegistrationRequests.get(id) === verificationRequest) document.getElementById(`push-check-${id}`).textContent = `Saved. ${saved.verification.message}`;
     } catch (err) {
-      toast(err.message, 'bad');
+      if (pushRegistrationRequests.get(id) === verificationRequest) toast(err.message, 'bad');
     } finally {
       btn.disabled = false;
     }
@@ -187,10 +191,12 @@
       switch (b.dataset.do) {
         case 'check': {
           b.disabled = true;
+          const verificationRequest = Symbol();
+          pushRegistrationRequests.set(id, verificationRequest);
           const el = document.getElementById(`push-check-${id}`);
           el.textContent = 'Checking saved secret (no notification)…';
           const data = await api(`api/members/${id}/brrr/check`, { method: 'POST', body: {} });
-          el.textContent = data.message;
+          if (pushRegistrationRequests.get(id) === verificationRequest) el.textContent = data.message;
           break;
         }
         case 'test':
@@ -228,6 +234,7 @@
         case 'clear': {
           const warn = m.active_reminders ? ` They’re on ${m.active_reminders} scheduled reminder${m.active_reminders === 1 ? '' : 's'}, which will fail to reach them until a new key is added.` : '';
           if (!(await confirmSheet({ title: `Remove ${m.name}’s key?`, body: `They won’t get reminders.${warn}`, confirmLabel: 'Remove key', danger: true }))) return;
+          pushRegistrationRequests.delete(id);
           await api(`api/members/${id}/brrr`, { method: 'DELETE' });
           toast('Key removed');
           await load();
