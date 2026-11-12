@@ -118,3 +118,20 @@ in-page sheets.
 ## License
 
 MIT
+
+## Silent push verification
+
+Push setup uses `PUSH_BASE_URL` (default: `https://api.brrr.now`). In notification
+settings, **Verify saved secret (no push)** rechecks the currently saved target;
+save any edited secret first. Saving a target also returns a verification result.
+The check uses bearer-authenticated `GET /v1/check` with a timeout and refuses
+redirects or URLs belonging to a different push service. Secrets and gateway
+response bodies are not included in verification feedback.
+
+A verified device/person secret means homePush recognizes it and has at least one
+active device with an APNs key. It does **not** prove phone delivery, notification
+permissions, or end-to-end receipt. Unknown secrets, inactive devices, missing
+APNs keys, connectivity errors, and invalid responses remain **not verified**.
+brrr and endpoints returning 404/405/501 are **unsupported**, not successful
+verification; saving remains available. Results are point-in-time, not a durable
+health badge—recheck after changing services or rotating/enrolling devices.

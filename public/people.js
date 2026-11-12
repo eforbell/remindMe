@@ -73,7 +73,9 @@
                    autocomplete="off" placeholder="${m.has_key ? 'Paste a new brrr secret or URL' : 'Paste brrr secret or URL'}" aria-label="brrr key for ${esc(m.name)}">
             <button type="submit" class="btn-solid">Save</button>
           </form>` : ''}
+        <div id="push-check-${m.id}" role="status" aria-live="polite"></div>
         <div class="person-actions">
+          ${m.has_key ? `<button type="button" class="btn-ghost btn-sm" data-do="check" data-id="${m.id}">Verify saved secret (no push)</button>` : ''}
           ${m.has_key ? `<button type="button" class="btn-primary btn-sm" data-do="test" data-id="${m.id}">Send test</button>` : ''}
           ${m.has_key && !editing.has(m.id) ? `<button type="button" class="btn-ghost btn-sm" data-do="change" data-id="${m.id}">Change key</button>` : ''}
           ${m.has_key && editing.has(m.id) ? `<button type="button" class="btn-ghost btn-sm" data-do="cancel" data-id="${m.id}">Cancel</button>` : ''}
@@ -141,12 +143,11 @@
     const btn = form.querySelector('button');
     btn.disabled = true;
     try {
-      await api(`api/members/${id}/brrr`, { method: 'PUT', body: { key } });
+      const saved = await api(`api/members/${id}/brrr`, { method: 'PUT', body: { key } });
       input.value = '';
       editing.delete(id);
-      toast('Key saved. Sending a test…');
       await load();
-      await test(id);
+      document.getElementById(`push-check-${id}`).textContent = `Saved. ${saved.verification.message}`;
     } catch (err) {
       toast(err.message, 'bad');
     } finally {
@@ -184,6 +185,14 @@
     if (!m) return;
     try {
       switch (b.dataset.do) {
+        case 'check': {
+          b.disabled = true;
+          const el = document.getElementById(`push-check-${id}`);
+          el.textContent = 'Checking saved secret (no notification)…';
+          const data = await api(`api/members/${id}/brrr/check`, { method: 'POST', body: {} });
+          el.textContent = data.message;
+          break;
+        }
         case 'test':
           b.disabled = true;
           await test(id);
@@ -248,7 +257,7 @@
       }
     } catch (err) {
       toast(err.message, 'bad');
-    }
+    } finally { b.disabled = false; }
   });
 
   $('add-form').addEventListener('submit', async (e) => {
