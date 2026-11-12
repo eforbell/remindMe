@@ -62,10 +62,21 @@ const RM = (() => {
     return `<span class="avatar ${size}" style="--avatar:${avatarColor(member.id)}" aria-hidden="true">${esc(initials(member.name))}</span>`;
   }
 
-  // Who is using this device (for "me" and "from …"). Per device, in localStorage.
+  // Who is using this device (for "me" and "from …"). Per device, in localStorage; under Home Base's suite
+  // identity (tailnet mode), the person the household account is linked to, from api/me, and never asked.
   const ME_KEY = 'rm_member';
-  function getMe() { const v = Number(localStorage.getItem(ME_KEY)); return Number.isInteger(v) && v > 0 ? v : null; }
-  function setMe(id) { if (id) localStorage.setItem(ME_KEY, String(id)); else localStorage.removeItem(ME_KEY); }
+  let who = null; // api/me: { mode, member }
+  async function loadWho() { who = await api('api/me'); return who; }
+  const tailnet = () => who?.mode === 'tailnet';
+  const isKid = () => tailnet() && who.member?.role !== 'parent';
+  function getMe() {
+    if (tailnet()) return who.member?.id ?? null;
+    const v = Number(localStorage.getItem(ME_KEY)); return Number.isInteger(v) && v > 0 ? v : null;
+  }
+  function setMe(id) {
+    if (tailnet()) return;
+    if (id) localStorage.setItem(ME_KEY, String(id)); else localStorage.removeItem(ME_KEY);
+  }
 
   // Household wall clock "now", computed live in the household zone (the phone may be elsewhere).
   function householdNow(timeZone) {
@@ -187,5 +198,5 @@ const RM = (() => {
     });
   }
 
-  return { core, esc, api, initials, avatarColor, avatar, getMe, setMe, householdNow, relativeAgo, whenText, wallOfIso, toast, openSheet, closeSheet, confirmSheet };
+  return { core, esc, api, initials, avatarColor, avatar, loadWho, tailnet, isKid, getMe, setMe, householdNow, relativeAgo, whenText, wallOfIso, toast, openSheet, closeSheet, confirmSheet };
 })();

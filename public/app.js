@@ -9,14 +9,18 @@
   const LEVEL = Object.fromEntries(core.LEVELS.map((l) => [l.value, l]));
   const COUNT_PRESETS = [5, 10, 30, 90];
 
-  const state = { config: null, members: [], reminders: [], problems: [], health: null, loaded: false };
+  const state = { config: null, members: [], reminders: [], problems: [], health: null, who: null, loaded: false };
 
   // ── Data ─────────────────────────────────────────────────────────────────
   async function load() {
     try {
-      const [config, m, r, health] = await Promise.all([
+      const [config, m, r, health, who] = await Promise.all([
         api('api/config'), api('api/members'), api('api/reminders'), api('api/health').catch(() => null),
+        state.who || RM.loadWho(),
       ]);
+      state.who = who;
+      // A kid's household account: the People page is a parent's, so its links and controls are hidden.
+      document.body.classList.toggle('suite-kid', RM.isKid());
       state.config = config;
       state.members = m.members;
       state.reminders = r.reminders;
@@ -136,12 +140,12 @@
   function renderMeChip() {
     const btn = $('me-btn');
     const me = memberById(RM.getMe());
-    btn.classList.toggle('hidden', state.members.length < 2);
+    btn.classList.toggle('hidden', RM.tailnet() || state.members.length < 2);
     btn.innerHTML = me ? `${avatar(me, 'avatar-sm')}<span class="me-name">${esc(me.name)}</span>` : '<span class="me-name">Who are you?</span>';
   }
 
   function maybeAskWho() {
-    if (RM.getMe() || state.members.length < 2 || sessionStorage.getItem('rm_who_asked')) return;
+    if (RM.tailnet() || RM.getMe() || state.members.length < 2 || sessionStorage.getItem('rm_who_asked')) return;
     sessionStorage.setItem('rm_who_asked', '1');
     openWho();
   }
@@ -161,7 +165,7 @@
     closeSheet($('whoami'));
     renderHome();
   });
-  $('me-btn').addEventListener('click', openWho);
+  $('me-btn').addEventListener('click', () => { if (!RM.tailnet()) openWho(); });
 
   // Banner and list actions (event delegation).
   async function act(action, id) {
@@ -406,8 +410,8 @@
     const keyless = state.members.length - ok.length;
     const dropped = c.droppedNames.length ? `${esc(c.droppedNames.join(', '))} no longer ${c.droppedNames.length === 1 ? 'has' : 'have'} a brrr key and ${c.droppedNames.length === 1 ? 'was' : 'were'} taken off. ` : '';
     $('who-help').innerHTML = dropped + (!ok.length
-      ? 'Nobody has a brrr key yet. <a href="people">Add one under People</a>.'
-      : keyless ? `People without a brrr key can’t be picked. <a href="people">Add keys</a>.` : '');
+      ? 'Nobody has a brrr key yet. <span class="to-people"><a href="people">Add one under People</a>.</span>'
+      : keyless ? `People without a brrr key can’t be picked. <span class="to-people"><a href="people">Add keys</a>.</span>` : '');
   }
 
   $('who-chips').addEventListener('click', (e) => {
