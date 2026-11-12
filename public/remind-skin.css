@@ -398,3 +398,7 @@ button:disabled { cursor: default; }
   .level-opt { grid-template-columns: 1fr; grid-template-rows: auto auto auto; align-items: start; }
   .level-hint { grid-column: 1; }
 }
+
+/* Suite identity: a kid's household account (tailnet mode). The People page is a parent's, and so is forgetting a
+   suggestion, so their links and controls are hidden; the server refuses them too. */
+.suite-kid a[href="people"], .suite-kid .to-people, .suite-kid .sugg-x { display: none !important; }

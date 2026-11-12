@@ -203,6 +203,10 @@ test('linking against PostgreSQL: unique, live people only, and the migration ru
     const sql = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrations', '0003_suite_member_link.sql'), 'utf8');
     await pool.query(`BEGIN; ${sql} COMMIT;`);
     await withServer(TAILNET, snapshotOf(MEMBERS), pool, async ({ get, link }) => {
+      // The kid's account is held by someone removed: refused like an unlinked one.
+      const removed = await get('/api/members', KID_HEADERS);
+      assert.equal(removed.status, 403);
+      assert.equal((await removed.json()).code, 'not_linked');
       assert.equal((await link(1, 'm_parent')).status, 200);
       assert.equal((await link(2, 'm_parent')).status, 409);
       assert.equal((await link(3, 'm_partner')).status, 404);
