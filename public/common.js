@@ -30,12 +30,12 @@ const RM = (() => {
   }
 
   // fetch wrapper: relative paths only (the app lives under a mount path such as /remind/).
+  // Every write says it is JSON, even with no body (a DELETE): under Home Base's suite identity the
+  // server refuses a write without it.
   async function api(path, { method = 'GET', body } = {}) {
     const init = { method, headers: { Accept: 'application/json' } };
-    if (body !== undefined) {
-      init.headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(body);
-    }
+    if (method !== 'GET' && method !== 'HEAD') init.headers['Content-Type'] = 'application/json';
+    if (body !== undefined) init.body = JSON.stringify(body);
     let res;
     try {
       res = await fetch(path.replace(/^\/+/, ''), init);
