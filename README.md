@@ -87,6 +87,7 @@ Without `TEST_DATABASE_URL`, the database tests are skipped and the pure ones st
 |---|---|---|
 | `DATABASE_URL` | required | PostgreSQL connection string |
 | `PORT` / `HOST` | `3013` / `127.0.0.1` | Loopback unless you mean to expose it |
+| `SOVEREIGN_LISTEN` | unset | Under Home Base, `unix:/path/app.sock`: listen on that Unix socket instead of TCP. Set at all, even blank, it must name a socket |
 | `HOUSEHOLD_TIMEZONE` | `America/New_York` | IANA zone that reminder times are in |
 | `APP_PUBLIC_URL` | empty | This app's address; used as the tap-through link only when `TAP_OPENS_APP=true` |
 | `TAP_OPENS_APP` | `false` | Tapping a push opens the app. Off by default, so Home Push shows the reminder itself instead |
