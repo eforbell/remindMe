@@ -202,3 +202,31 @@ test('in tailnet mode a reminder is from the requester\'s own person, whoever th
     await pool.end();
   }
 });
+
+test('a kid\'s list of people says who can be reached, never key previews, delivery errors or mirror state', async () => {
+  class PeopleDb extends StandInDb {
+    async query(sql, params = []) {
+      if (sql.includes('LEFT JOIN member_notification_channels')) {
+        return { rows: [{
+          id: 1, name: 'Parent', has_key: true, key_preview: '••••ABCD', last_ok_at: '2026-01-01T00:00:00Z', last_error: 'gateway said no', last_error_at: '2026-01-02T00:00:00Z',
+          has_mirror_key: true, mirror_key_preview: '••••WXYZ', mirror_last_ok_at: null, mirror_last_error: 'mirror said no', mirror_last_error_at: null, active_reminders: 3,
+        }] };
+      }
+      return super.query(sql, params);
+    }
+  }
+  const env = { ...TAILNET, PUSH_MIRROR_URL: 'https://mirror.example/', MIRROR_BASE_URL: 'https://mirror.example/' };
+  await withServer(env, directoryOf(MEMBERS()), new PeopleDb(), async (call) => {
+    const kid = await call('GET', '/api/members', KID_HEADERS);
+    assert.equal(kid.status, 200);
+    assert.deepEqual(kid.json(), { members: [{ id: 1, name: 'Parent', has_key: true }], mirror_enabled: false });
+    assert.doesNotMatch(kid.text, /ABCD|WXYZ|said no|preview|error/);
+    const parent = (await call('GET', '/api/members', PARENT_HEADERS)).json();
+    assert.equal(parent.members[0].key_preview, '••••ABCD');
+    assert.equal(parent.members[0].last_error, 'gateway said no');
+  });
+  // Local mode: the list is the People page's, as before.
+  await withServer({}, null, new PeopleDb(), async (call) => {
+    assert.equal((await call('GET', '/api/members')).json().members[0].mirror_key_preview, '••••WXYZ');
+  });
+});
