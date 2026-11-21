@@ -139,7 +139,7 @@ test('a failed send retries with back-off and then succeeds', { skip: db.skip },
   assert.equal(rows[0].last_error, null);
 });
 
-test('every attempt at a delivery carries the same Idempotency-Key; each delivery its own', { skip: db.skip }, async () => {
+test('every attempt at a delivery carries the same Idempotency-Key; each delivery its own, random', { skip: db.skip }, async () => {
   const [sam, riley] = await household(['Sam', 'Riley']);
   await reminders.create(pool, { text: 'Lights out', date: '2026-11-03', time: '09:00', recipients: [sam.id, riley.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
   // Sam's first attempt "times out" (the gateway may well have pushed it); the retry must say it's the same send.
@@ -148,7 +148,7 @@ test('every attempt at a delivery carries the same Idempotency-Key; each deliver
   await pass(t0, sender);
   await pass(minutes(t0, 1), sender);
   const ds = await deliveries();
-  const keyOf = (d) => `remind-me-delivery-${d.id}`;
+  const keyOf = (d) => `remind-me-${d.send_key}`; // random per delivery: ids repeat across installs
   const samD = ds.find((d) => d.member_id === sam.id);
   const rileyD = ds.find((d) => d.member_id === riley.id);
   assert.equal(samD.status, 'sent');
@@ -156,6 +156,7 @@ test('every attempt at a delivery carries the same Idempotency-Key; each deliver
   assert.deepEqual(samKeys, [keyOf(samD), keyOf(samD)]);
   assert.deepEqual(sender.calls.filter((c) => c.secret.includes('riley')).map((c) => c.idempotencyKey), [keyOf(rileyD)]);
   assert.notEqual(keyOf(samD), keyOf(rileyD));
+  assert.match(keyOf(samD), /^remind-me-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
 test('a send that keeps failing gives up at the give-up time', { skip: db.skip }, async () => {
