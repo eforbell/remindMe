@@ -9,8 +9,9 @@ SET LOCAL lock_timeout = '5s';
 ALTER TABLE reminders
   ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'family'));
 
--- Suggestions are offered back to who wrote them (and to the people they reminded), so a private reminder's
--- text doesn't turn up in someone else's composer. Rows from before this have no author: they're offered to
--- the people they last reminded.
-ALTER TABLE suggestions
-  ADD COLUMN IF NOT EXISTS created_by INT REFERENCES family_members(id);
+-- Suggestions are kept per author and offered back only to them, so a private reminder's text doesn't turn
+-- up in someone else's composer, and two people using the same text keep their own. author 0: nobody known
+-- (rows from before this, or a phone that hasn't said who it is), offered to the people it last reminded.
+ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS author INT NOT NULL DEFAULT 0;
+ALTER TABLE suggestions DROP CONSTRAINT IF EXISTS suggestions_pkey;
+ALTER TABLE suggestions ADD PRIMARY KEY (author, key);

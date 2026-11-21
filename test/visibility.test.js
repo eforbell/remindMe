@@ -38,9 +38,11 @@ const AS = {
   [RILEY]: { 'x-sovereign-user-id': 'u-riley', 'x-sovereign-login': 'riley@example.com' },
   [JO]: { 'x-sovereign-user-id': 'u-jo', 'x-sovereign-login': 'jo@example.com' },
 };
-const clock = new Date('2026-11-02T15:00:00Z'); // Monday 10:00 New York
+const START = new Date('2026-11-02T15:00:00Z'); // Monday 10:00 New York
+let clock = START;
 
 async function household(pool) {
+  clock = START;
   await db.reset(pool);
   await pool.query("INSERT INTO family_members (name, suite_member_id) VALUES ('Sam', 'm_sam'), ('Riley', 'm_riley'), ('Jo', 'm_jo')");
   await pool.query("INSERT INTO member_notification_channels (member_id, target_secret) VALUES (1, 'br_usr_sam00001'), (2, 'br_usr_riley0001'), (3, 'br_usr_jo000001')");
@@ -144,23 +146,53 @@ test('tailnet: only the people on a whole-family reminder get its push; delivery
   });
 });
 
-test('suggestions are offered back to who wrote them and the people on them, not to everyone', { skip: db.skip }, async () => {
+test('suggestions are kept per author and offered only to them', { skip: db.skip }, async () => {
   await household(pool);
   // A row from before suggestions had an author: offered to the people it reminded.
   await pool.query("INSERT INTO suggestions (key, text, last_recipient_ids) VALUES ('call grandma', 'Call grandma', ARRAY[2])");
   await withServer(TAILNET, pool, async (call) => {
     await call('POST', 'api/reminders', AS[SAM], reminder('Buy a gift for Jo', [SAM]));
-    await call('POST', 'api/reminders', AS[SAM], reminder('Bring a gift bag', [RILEY]));
+    const bag = (await call('POST', 'api/reminders', AS[SAM], reminder('Bring a gift bag', [RILEY]))).data.id;
     const offered = async (who, q) => (await call('GET', `api/suggestions?q=${encodeURIComponent(q)}`, AS[who])).data.suggestions.map((s) => s.text).sort();
     assert.deepEqual(await offered(SAM, 'gift'), ['Bring a gift bag', 'Buy a gift for Jo']);
-    assert.deepEqual(await offered(RILEY, 'gift'), ['Bring a gift bag']);
+    assert.deepEqual(await offered(RILEY, 'gift'), [], 'set for Riley, but Sam wrote it');
     assert.deepEqual(await offered(JO, 'gift'), []);
     assert.deepEqual(await offered(JO, ''), []);
     assert.deepEqual(await offered(RILEY, 'grandma'), ['Call grandma']);
     assert.deepEqual(await offered(SAM, 'grandma'), []);
-    // Forgetting one you aren't offered does nothing (it's a parent's action in tailnet mode).
+
+    // Riley edits Sam's reminder (only its time): that's Riley's use of the text; Sam keeps his.
+    const r = (await call('GET', 'api/reminders', AS[RILEY])).data.reminders.find((x) => x.id === bag);
+    assert.equal((await call('PUT', `api/reminders/${bag}`, AS[RILEY], reminder('Bring a gift bag', [RILEY], { time: '18:00', version: r.version }))).status, 200);
+    assert.deepEqual(await offered(SAM, 'bag'), ['Bring a gift bag']);
+    assert.deepEqual(await offered(RILEY, 'bag'), ['Bring a gift bag']);
+
+    // Jo writing the same text as Sam keeps her own row; Sam's (and its recipients) is untouched.
+    await call('POST', 'api/reminders', AS[JO], reminder('Buy a gift for Jo', [JO], { time: '12:00' }));
+    const sams = (await call('GET', 'api/suggestions?q=buy', AS[SAM])).data.suggestions;
+    assert.deepEqual(sams.map((x) => [x.text, x.time, x.recipients]), [['Buy a gift for Jo', '17:00', [SAM]]]);
+    assert.deepEqual(await offered(JO, 'buy'), ['Buy a gift for Jo']);
+
+    // Forgetting is per author: Jo forgetting hers leaves Sam's.
     assert.equal((await call('DELETE', 'api/suggestions', AS[JO], { text: 'Buy a gift for Jo' })).status, 200);
+    assert.deepEqual(await offered(JO, 'buy'), []);
     assert.deepEqual(await offered(SAM, 'buy'), ['Buy a gift for Jo']);
+  });
+});
+
+test('the mirror report counts every delivery but leaves out titles the viewer can\'t see', { skip: db.skip }, async () => {
+  await household(pool);
+  await withServer(TAILNET, pool, async (call) => {
+    await call('POST', 'api/reminders', AS[SAM], reminder('Buy a gift for Jo', [SAM]));
+    await call('POST', 'api/reminders', AS[SAM], reminder('Trash night', [SAM], { visibility: 'family' }));
+    await dispatcher.runPass(pool, {
+      source: 'test', now: () => new Date('2026-11-02T22:00:20Z'), sendImpl: async () => ({ status: 200 }),
+      config: { ...dispatcher.defaultConfig({}), mirrorUrl: null }, log: { log() {}, error() {} },
+    });
+    clock = new Date('2026-11-02T23:00:00Z'); // after they went out
+    const titles = async (who) => (await call('GET', 'api/mirror/report?days=30', AS[who])).data.deliveries.map((d) => d.title).sort();
+    assert.deepEqual(await titles(SAM), ['Buy a gift for Jo', 'Trash night']);
+    assert.deepEqual(await titles(JO), ['Trash night', null]);
   });
 });
 

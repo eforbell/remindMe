@@ -34,7 +34,11 @@
       state.loaded = true;
       const me = RM.getMe();
       if (me && !state.members.some((x) => x.id === me)) RM.setMe(null);
-      if (!RM.getMe() && state.members.length === 1) RM.setMe(state.members[0].id);
+      // A one-person household picks its person; what this phone sees depends on it, so fetch again as them.
+      if (!RM.getMe() && state.members.length === 1) {
+        RM.setMe(state.members[0].id);
+        if (!RM.tailnet()) return load();
+      }
       renderHome();
       if (!$('scheduled').classList.contains('hidden')) renderScheduled();
       maybeAskWho();
