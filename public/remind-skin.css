@@ -258,6 +258,7 @@ button:disabled { cursor: default; }
 .tp-quarters button { font-size: var(--text-md); font-variant-numeric: tabular-nums; min-height: var(--tap); }
 .tp-quarters button.is-on { background: var(--accent-solid); color: var(--accent-solid-ink); }
 .seg-repeat button { font-size: 13px; }
+.seg-seen button { font-size: var(--text-sm); }
 
 /* Repeat details */
 .repeat-detail { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--surface2); }
@@ -331,6 +332,9 @@ button:disabled { cursor: default; }
 .level-pill { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: var(--radius-pill); white-space: nowrap; background: var(--surface3); color: var(--muted); }
 .level-pill.level-time-sensitive { background: var(--accent-soft); color: var(--accent); }
 .level-pill.level-critical { background: var(--bad-bg); color: var(--bad); }
+.rem-pills { display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.seen-pill { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: var(--radius-pill); white-space: nowrap;
+  background: var(--surface3); color: var(--muted); border: 1px solid var(--border); }
 
 .recent { margin-top: var(--s-5); }
 .recent summary { cursor: pointer; font-weight: 700; color: var(--muted); padding: 10px 0; min-height: 44px; display: flex; align-items: center; }

@@ -8,6 +8,11 @@
   const UNIT = { daily: 'day', weekly: 'week', monthly: 'month', yearly: 'year' };
   const LEVEL = Object.fromEntries(core.LEVELS.map((l) => [l.value, l]));
   const COUNT_PRESETS = [5, 10, 30, 90];
+  // Who sees a reminder. Either way, only the people on it get the push.
+  const SEEN = [
+    { value: 'private', label: 'Private', help: 'Only you and the people it reminds can see it.' },
+    { value: 'family', label: 'Whole family', help: 'Everyone sees it coming. Only the people it reminds get the push.' },
+  ];
 
   const state = { config: null, members: [], reminders: [], problems: [], health: null, who: null, loaded: false };
 
@@ -76,7 +81,9 @@
         <span class="next-until">${esc(untilText(next.next.at))}</span>
       </div>
       <div class="next-people">to ${esc(peopleText(next.recipients))}${next.repeat.freq !== 'once' ? ` · ${esc(FREQ_LABEL[next.repeat.freq].toLowerCase())}` : ''}</div>`
-      : `<div class="next-empty">Nothing scheduled.</div><div class="next-people">Tap <strong>New reminder</strong> to set one.</div>`;
+      : (!RM.tailnet() && !RM.getMe() && state.members.length > 1
+        ? `<div class="next-empty">Who’s using this phone?</div><div class="next-people">Tap <strong>Who are you?</strong> at the top to see your reminders.</div>`
+        : `<div class="next-empty">Nothing scheduled.</div><div class="next-people">Tap <strong>New reminder</strong> to set one.</div>`);
 
     renderBanners(today);
     renderMeChip();
@@ -163,7 +170,8 @@
     if (!b) return;
     RM.setMe(Number(b.dataset.id));
     closeSheet($('whoami'));
-    renderHome();
+    // What you see depends on who you are: fetch your reminders.
+    load();
   });
   $('me-btn').addEventListener('click', () => { if (!RM.tailnet()) openWho(); });
 
@@ -238,7 +246,7 @@
       <article class="rem-card ${r.ending_soon ? 'is-ending' : ''}" data-id="${r.id}">
         <div class="rem-top">
           <h3 class="rem-text">${esc(r.text)}</h3>
-          <span class="level-pill level-${esc(r.level)}">${esc(level?.label || r.level)}</span>
+          <span class="rem-pills">${r.visibility === 'family' ? '<span class="seen-pill">Whole family</span>' : ''}<span class="level-pill level-${esc(r.level)}">${esc(level?.label || r.level)}</span></span>
         </div>
         <div class="rem-when"><span class="rem-label">Next</span>${esc(RM.whenText(r.next.date, r.next.time, today))} <span class="muted">· ${esc(untilText(r.next.at))}</span></div>
         <div class="rem-repeat"><span class="rem-label">Repeat</span>${esc(repeatText)}${bounded && r.last ? `<span class="muted"> · last ${esc(RM.whenText(r.last.date, r.last.time, today))}</span>` : ''}</div>
@@ -311,7 +319,7 @@
       text: '', recipients: new Set(me?.has_key ? [me.id] : (reachable().length === 1 ? [reachable()[0].id] : [])),
       date: slot.date, time: slot.time,
       freq: 'once', every: 1, weekdays: new Set([core.weekdayOf(slot.date)]), weekdaysAuto: true,
-      ends: 'after', count: core.DEFAULT_COUNTS.daily, level: state.config.default_level,
+      ends: 'after', count: core.DEFAULT_COUNTS.daily, level: state.config.default_level, visibility: 'private',
       anchor: null, anchorFreq: null, anchorEvery: null, origDate: null, droppedNames: [],
     });
     const d = core.parseDate(c.date);
@@ -331,6 +339,7 @@
       freq: rep.freq,
       every: rep.every || 1,
       level: r.level,
+      visibility: r.visibility === 'family' ? 'family' : 'private',
       ends: rep.freq !== 'once' && rep.count == null ? 'never' : 'after',
       count: rep.freq === 'once' ? core.DEFAULT_COUNTS.daily : (rep.count ?? core.DEFAULT_COUNTS[rep.freq]),
     });
@@ -390,6 +399,7 @@
     renderTime();
     renderRepeat();
     renderLevels();
+    renderSeen();
     renderReadout();
     $('what-clear').classList.toggle('hidden', !c.text);
     const tz = state.config.timezone;
@@ -705,6 +715,18 @@
     return null;
   }
 
+  function renderSeen() {
+    $('seen-seg').innerHTML = SEEN.map((o) => `<button type="button" role="radio" aria-checked="${c.visibility === o.value}" class="${c.visibility === o.value ? 'is-on' : ''}" data-seen="${o.value}">${esc(o.label)}</button>`).join('');
+    $('seen-help').textContent = SEEN.find((o) => o.value === c.visibility).help;
+  }
+  $('seen-seg').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-seen]');
+    if (!b) return;
+    c.visibility = b.dataset.seen;
+    renderSeen();
+    renderReadout();
+  });
+
   function renderReadout() {
     const today = now().date;
     const first = firstDate() || c.date;
@@ -716,6 +738,7 @@
     parts.push(RM.whenText(first, c.time, today));
     if (c.freq !== 'once') parts.push(core.describeRepeat(currentRule(), anchorDate()).replace(/^./, (x) => x.toLowerCase()));
     parts.push(level.toLowerCase());
+    if (c.visibility === 'family') parts.push('the whole family sees it');
     $('composer-summary').innerHTML = `${c.text.trim() ? `<strong>${esc(c.text.trim())}</strong><br>` : ''}${esc(parts.join(' · '))}`;
     const p = problem();
     $('schedule-btn').classList.toggle('is-blocked', Boolean(p));
@@ -900,6 +923,7 @@
       date: c.date,
       time: c.time,
       level: c.level,
+      visibility: c.visibility,
       repeat: currentRule(),
       created_by: RM.getMe(),
     };

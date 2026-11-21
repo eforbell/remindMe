@@ -32,9 +32,13 @@ const RM = (() => {
   // fetch wrapper: relative paths only (the app lives under a mount path such as /remind/).
   // Every write says it is JSON, even with no body (a DELETE): under Home Base's suite identity the
   // server refuses a write without it.
+  // In local mode it also says who is using this device (X-Remind-Me-As), which decides the reminders the
+  // server shows; under the suite identity the server knows who is asking and ignores it.
   async function api(path, { method = 'GET', body } = {}) {
     const init = { method, headers: { Accept: 'application/json' } };
     if (method !== 'GET' && method !== 'HEAD') init.headers['Content-Type'] = 'application/json';
+    const me = tailnet() ? null : getMe();
+    if (me) init.headers['X-Remind-Me-As'] = String(me);
     if (body !== undefined) init.body = JSON.stringify(body);
     let res;
     try {
