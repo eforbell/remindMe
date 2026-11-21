@@ -43,6 +43,9 @@ The dispatcher (`lib/dispatcher.js`) runs **every minute from two places**: the
 
 The two schedulers never double-send, because every step claims rows. Delivery is at-least-once: a crash
 between brrr accepting a push and the row being marked sent means a rare duplicate, never a miss.
+Every attempt at a delivery carries the same `Idempotency-Key` header, so a gateway that honors it (Home
+Push) answers a retry "already sent" instead of pushing again when an earlier attempt got through but timed
+out. brrr ignores the header.
 
 Other details:
 

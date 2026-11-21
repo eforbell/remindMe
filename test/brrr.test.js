@@ -77,3 +77,12 @@ test('a secret echoed across the truncation point is still redacted', async () =
     return true;
   });
 });
+
+test('send passes an Idempotency-Key header only when given one', async () => {
+  const seen = [];
+  const ok = async (url, init) => { seen.push(init.headers); return { ok: true, status: 200 }; };
+  await brrr.send('br_usr_secretvalue1234', { title: 't' }, { fetchImpl: ok, idempotencyKey: 'remind-me-0b5e1f0c-7d2a-4c9e-9a51-3f6d2e8b4c17' });
+  await brrr.send('br_usr_secretvalue1234', { title: 't' }, { fetchImpl: ok });
+  assert.equal(seen[0]['Idempotency-Key'], 'remind-me-0b5e1f0c-7d2a-4c9e-9a51-3f6d2e8b4c17');
+  assert.equal('Idempotency-Key' in seen[1], false);
+});

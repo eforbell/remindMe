@@ -20,8 +20,8 @@ test.after(async () => { if (pool) await pool.end(); });
 // A recording fake for brrr: succeeds unless `fail` says otherwise.
 function fakeSender({ fail = () => false, delayMs = 0 } = {}) {
   const calls = [];
-  const sendImpl = async (secret, payload) => {
-    calls.push({ secret, payload });
+  const sendImpl = async (secret, payload, options = {}) => {
+    calls.push({ secret, payload, idempotencyKey: options.idempotencyKey });
     if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
     if (fail(calls.length, secret)) throw Object.assign(new Error('brrr answered 503'), { status: 503 });
     return { status: 200 };
@@ -137,6 +137,26 @@ test('a failed send retries with back-off and then succeeds', { skip: db.skip },
   const { rows } = await pool.query('SELECT last_ok_at, last_error FROM member_notification_channels WHERE member_id = $1', [sam.id]);
   assert.ok(rows[0].last_ok_at);
   assert.equal(rows[0].last_error, null);
+});
+
+test('every attempt at a delivery carries the same Idempotency-Key; each delivery its own, random', { skip: db.skip }, async () => {
+  const [sam, riley] = await household(['Sam', 'Riley']);
+  await reminders.create(pool, { text: 'Lights out', date: '2026-11-03', time: '09:00', recipients: [sam.id, riley.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  // Sam's first attempt "times out" (the gateway may well have pushed it); the retry must say it's the same send.
+  const sender = fakeSender({ fail: (n, secret) => n <= 2 && secret.includes('sam') });
+  const t0 = at('2026-11-03T14:00:20Z');
+  await pass(t0, sender);
+  await pass(minutes(t0, 1), sender);
+  const ds = await deliveries();
+  const keyOf = (d) => `remind-me-${d.send_key}`; // random per delivery: ids repeat across installs
+  const samD = ds.find((d) => d.member_id === sam.id);
+  const rileyD = ds.find((d) => d.member_id === riley.id);
+  assert.equal(samD.status, 'sent');
+  const samKeys = sender.calls.filter((c) => c.secret.includes('sam')).map((c) => c.idempotencyKey);
+  assert.deepEqual(samKeys, [keyOf(samD), keyOf(samD)]);
+  assert.deepEqual(sender.calls.filter((c) => c.secret.includes('riley')).map((c) => c.idempotencyKey), [keyOf(rileyD)]);
+  assert.notEqual(keyOf(samD), keyOf(rileyD));
+  assert.match(keyOf(samD), /^remind-me-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
 test('a send that keeps failing gives up at the give-up time', { skip: db.skip }, async () => {
