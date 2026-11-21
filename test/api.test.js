@@ -30,11 +30,12 @@ test.after(async () => {
   if (pool) await pool.end();
 });
 
+// Local mode, on Sam's phone: the page says who is using it (X-Remind-Me-As), as public/common.js does.
 async function call(method, path, body, headers = {}) {
   const res = await fetch(base + path, {
     method,
     redirect: 'manual',
-    headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers },
+    headers: { 'X-Remind-Me-As': '1', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers },
     body: body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body)),
   });
   let data = null;

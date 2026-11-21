@@ -25,6 +25,11 @@ or runs on its own with Node 20+ and PostgreSQL.
   the phone).
 - **People**: each person pastes their own brrr webhook secret or URL. Without one, nobody can pick them.
   **Send test** confirms the key works.
+- **Who sees what**: you see the reminders you set and the ones you're on. **Who sees it** in the
+  composer makes one **Private** (the default) or **Whole family**: everyone sees it coming, but only the
+  people on it get the push. Suggestions are offered back to who wrote them and the people they reminded.
+  Who "you" are comes from Home Base's suite identity, or without it from the **Who are you?** choice on
+  each phone (sent as `X-Remind-Me-As`). That choice is trusted: it keeps lists tidy, not secret.
 
 ## How delivery stays reliable
 
