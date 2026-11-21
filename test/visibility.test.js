@@ -189,10 +189,14 @@ test('the mirror report counts every delivery but leaves out titles the viewer c
       source: 'test', now: () => new Date('2026-11-02T22:00:20Z'), sendImpl: async () => ({ status: 200 }),
       config: { ...dispatcher.defaultConfig({}), mirrorUrl: null }, log: { log() {}, error() {} },
     });
+    await pool.query("UPDATE deliveries SET mirror_claimed_at = now(), mirror_error = 'gateway 422: Invalid title: ' || (payload->>'title')");
     clock = new Date('2026-11-02T23:00:00Z'); // after they went out
     const titles = async (who) => (await call('GET', 'api/mirror/report?days=30', AS[who])).data.deliveries.map((d) => d.title).sort();
     assert.deepEqual(await titles(SAM), ['Buy a gift for Jo', 'Trash night']);
     assert.deepEqual(await titles(JO), ['Trash night', null]);
+    const errors = (await call('GET', 'api/mirror/report?days=30', AS[JO])).data.deliveries.map((d) => d.mirror_error).sort();
+    assert.deepEqual(errors, ['gateway 422: Invalid title: Trash night', null], 'an error that quotes a private title is left out too');
+    assert.equal((await call('GET', 'api/mirror/report?days=30', AS[JO])).data.totals.mirror_failed, 2, 'still counted');
   });
 });
 
