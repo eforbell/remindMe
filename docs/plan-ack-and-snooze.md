@@ -1,6 +1,6 @@
 # Plan: "Until acknowledged" and snooze
 
-Status: proposed, not built. Revised after Codex review rounds 1 and 2 (see the end).
+Status: proposed, not built. Revised after Codex review rounds 1–3 (see the end).
 
 ## Why
 
@@ -156,8 +156,8 @@ SELECT d.* FROM deliveries d
 **Lock order.** Inserting a follow-up alert takes foreign-key locks on its reminder and member. Delete
 (`lockActive`) holds the reminder and then waits for the delivery; archive does the same through the member.
 Locking the delivery first and then waiting on the reminder would deadlock against them. This SELECT takes
-all three locks at once with `SKIP LOCKED`, so it never waits: a delivery whose reminder is being deleted is
-skipped until next pass. The insert's foreign-key checks then find locks this transaction already holds.
+all three row locks at once with `SKIP LOCKED`, so it never waits on a row lock (ordinary table-level locks
+are still taken as usual): a delivery whose reminder is being deleted is skipped until next pass. The insert's foreign-key checks then find locks this transaction already holds.
 Everything else keeps the order reminder → member → delivery → its follow-up alerts. Got it and snooze lock
 the delivery, then its alerts.
 
@@ -169,7 +169,10 @@ For each row:
    now. Its payload is built fresh (wording below). Its `give_up_at` is `now + max(15, every) min` for a nag and
    `now + 30 min` for a snooze, and its `expiration_date` equals that `give_up_at`.
    - The window is at least 15 minutes, so no alert is created already expired.
-   - A claim left by a dispatcher that died (reclaimed after `CLAIM_STALE_MS`, 5 min) is still in time.
+   - A claim left by a dispatcher that died is recovered by whichever comes first: the stale-claim sweep
+     (after `CLAIM_STALE_MS`, 5 min, still inside the window), or the next alert, which replaces it (step 3).
+     With a 5-minute interval the next alert usually wins. The last alert has no successor, so the sweep
+     recovers it.
    - The horizon doesn't shorten it.
 
    `ON CONFLICT DO NOTHING` on the new unique key.
@@ -179,7 +182,8 @@ For each row:
 4. **Move the cursor on:**
    - `follow_ups = alert_no`
    - With "Until acknowledged", the next nag is due at `$now + every`; once that would pass
-     `follow_up_until`, the cursor is cleared and the delivery is marked `expired`.
+     `follow_up_until`, the cursor is cleared and the delivery is marked `expired`. Expiry only stops new
+     alerts. The alert just created, the last one, is left to send within its own window (see Stopping).
    - After a snooze on a normal reminder, the cursor is simply cleared, so a later snooze is still possible.
    - Moving from `$now`, not from the old cursor, means one alert after downtime, not a burst.
 
@@ -189,45 +193,64 @@ an alert that exists gets sent by any later pass.
 ### 3. Sending
 
 This is the existing send step. Follow-up alerts sit in the same queue and use the same claim, finish,
-back-off and give-up. Before a follow-up alert is handed to the push service, `sendOne` re-reads its delivery.
-If the delivery has been acknowledged, superseded or cancelled, or the reminder was deleted, the alert becomes
-`cancelled` instead of being sent. The mirror skips follow-up alerts, and the late "Was due …" rewrite doesn't
+back-off and give-up.
+
+Immediately before any row is handed to the push service, first pushes included, `sendOne` makes one
+check in a single query:
+
+- the row is still `sending` under **this worker's** `claim_token` (Got it or a snooze may have cancelled it
+  since it was claimed);
+- for a follow-up alert, its delivery isn't acknowledged, superseded or cancelled;
+- the reminder isn't deleted.
+
+If any of these fails, the row isn't sent. A row this worker still owns becomes `cancelled`; one it no longer
+owns is left alone. The mirror skips follow-up alerts, and the late "Was due …" rewrite doesn't
 apply to them; they carry their own wording.
 
-**Queue order changes from `scheduled_for, id` to `give_up_at, id`.** Among first pushes nothing changes,
-because their `give_up_at` is `scheduled_for` plus the same constant. A follow-up alert's window is short, so
+**Queue order changes from `scheduled_for, id` to `give_up_at, id`.** Among first pushes nothing changes while
+`DELIVERY_GIVE_UP_HOURS` stays the same, because their `give_up_at` is `scheduled_for` plus that constant.
+After the setting changes, they go in order of their stored deadlines, which is still a sensible priority. A follow-up alert's window is short, so
 it goes ahead of an old backlog of first pushes instead of ageing out behind them. A first push still within
 15 minutes of its own give-up still goes first. Health also reports the oldest follow-up alert still due
 (`follow_up_lag_s`), so a stalled queue shows even though the heartbeat stays fresh.
 
 ### Got it, snooze and stops cancel everything not yet sent
 
-Got it, a snooze, and every stop in the table below move **every unsent row of the delivery** to `cancelled`
-(or `missed` for a supersession) in the same transaction. Unsent means `pending` or `sending`, and it includes
-the first push's own retry. Concretely:
+Got it, a snooze, and every **final** stop in the table below move the delivery's **unsent follow-up alerts**
+to `cancelled` (or `missed` for a supersession) in the same transaction. Unsent means `pending` or `sending`.
+Expiry is not a final stop: it only clears the cursor, and alerts already created still go out within their
+own windows.
 
-- **The first push timed out after the phone showed it.** Got it cancels its retry, so it doesn't come back.
 - **Alert 1 failed at 09:15 and is waiting to retry at 09:16, and the person snoozes until 09:45.** The
   snooze cancels the 09:16 retry.
-- **A worker already holding a row (`sending`)** loses it. Its `finish()` updates nothing, and the stale-claim
-  sweep never picks it up again.
+- **A worker already holding a row (`sending`)** loses it. The send-time check stops the HTTP request if it
+  hasn't started. `finish()` updates nothing, and the stale-claim sweep never picks it up again.
 
-When the unsent row is the **first push itself**, what it becomes depends on where the tap came from:
+**The first push is handled by where the tap came from:**
 
-- **Through a token (notification or tap-through page):** it becomes `sent`, with `sent_at = now` and a note.
-  The token came from that push, so the push arrived; only the push service's answer was lost.
-- **From the app:** it becomes `cancelled`.
+| Tap came from | Got it | Snooze |
+|---|---|---|
+| A token (notification or tap-through page) | The first push, if unsent, becomes `sent` | Same |
+| The app | The first push, if unsent, becomes `cancelled` | The first push is left alone |
 
-Either way, the card and the list read the delivery's acknowledgement and follow-up fields, not its status,
-to show its state. Follow-up creation and the send-time recheck never look at the delivery's status.
+- **Why a token tap marks it `sent`:** the token came from that push, so the push arrived; only the push
+  service's answer was lost. Promoting it also clears the member's channel `last_error`, as a successful send
+  does. Otherwise the People page could keep saying the last send failed.
+- **Why the app leaves it alone on snooze:** it keeps sending or retrying as usual, so the delivery never sits
+  `cancelled` while its snooze is still live and hides from the creator's view. Arming in step 1 respects the
+  snooze's cursor.
+
+The card, the list, the creator's view and recent deliveries read the delivery's acknowledgement and follow-up
+fields, not its status. An acknowledged first push that is `cancelled` still shows there as "Got it".
+Follow-up creation never looks at the delivery's status.
 
 ### What Remind Me can and can't promise
 
-Once Got it commits, Remind Me starts no new hand-off to the push service for that delivery. Some alerts may
-still arrive:
+Once Got it commits, no row of that delivery passes the send-time check, so Remind Me starts no new hand-off to
+the push service. Some alerts may still arrive:
 
-- **An HTTP request already in flight** when it commits can still get through. That is at most one per row
-  being sent, bounded by the 10-second send timeout. Holding a database lock across the HTTP call would close
+- **An HTTP request that passed its check before the commit** can still get through. That is at most one per
+  row being sent, bounded by the 10-second send timeout. Holding a database lock across the HTTP call would close
   this gap, but it would tie up pool connections for the length of a send, so the plan doesn't.
 - **A push service that queues** can deliver an alert it had already accepted. Home Push answers 202 when it
   queues a send.
@@ -240,19 +263,24 @@ Stopping queued alerts inside the gateway would need gateway work. It isn't in t
 | Event | Effect |
 |---|---|
 | Got it (the person, or the creator for them) | delivery `acked`; its unsent rows `cancelled` |
-| `follow_up_until` / horizon passes | delivery `expired` (shown as "not acknowledged"); Got it still accepted late |
-| **Any** later occurrence of the reminder is recorded, whether it is sent or `missed` | older deliveries (every member) `superseded`; their pending alerts `cancelled` |
+| `follow_up_until` / horizon passes (soft) | delivery `expired` (shown as "not acknowledged"); no new alerts, but alerts already created still send; Got it still accepted late |
+| **Any** later occurrence of the reminder is recorded, whether it is sent or `missed` | older deliveries (every member) `superseded`; their unsent follow-up alerts `missed` |
 | Reminder deleted | all its deliveries `cancelled`; all pending rows `cancelled` (as today) |
 | Edited with "Until acknowledged" turned off | its open deliveries `cancelled` |
 | Edited so a recipient is removed | that member's open deliveries for it `cancelled` |
 | Member archived | their open deliveries `cancelled` (in `members.archive`, alongside today's pending cancel) |
 
-Each of these sets `follow_up_ended` by the final-over-soft rule (Ending reasons), clears `follow_up_at`, and
-cancels the delivery's unsent rows. It applies whatever the delivery's status, so arming in step 1 sees it.
+Each of these sets `follow_up_ended` by the final-over-soft rule (Ending reasons) and clears `follow_up_at`.
+The final ones also cancel the delivery's unsent follow-up alerts. Each applies whatever the delivery's status,
+so arming in step 1 sees it.
 
-Supersession now runs whenever a later occurrence is recorded, whether it is sent or `missed`. Today
-`recordDue` only marks older retries `missed` when the new occurrence is sendable. Running it every time
-changes nothing for first pushes: if the new occurrence is past its give-up time, an older one is too.
+**Supersession has two parts, and only one is new:**
+
+- **Ending older deliveries' follow-ups, and making their unsent follow-up alerts `missed`,** runs whenever a
+  later occurrence is recorded, whether it is sent or `missed`.
+- **Older first pushes still retrying** keep today's rule: they are made `missed` only when the new occurrence
+  is sendable. Their `give_up_at` was stored under whatever `DELIVERY_GIVE_UP_HOURS` was set at the time, so
+  an older push can still be in time when a newer one is already past its own.
 
 A one-off, or the last of a series, is `completed` as soon as it's recorded, and the edit API refuses
 finished reminders. Its alerts are stopped per delivery instead: Got it, or the creator's Mark done. The
@@ -265,10 +293,10 @@ Every existing query on `deliveries` was checked:
 | Where | Change |
 |---|---|
 | `recordDue` insert | `ON CONFLICT` names the new four-column key. It generates the delivery's `send_key` itself (see Token). |
-| `recordDue` "superseded" update | runs for every recorded later occurrence, not only sendable ones; covers `pending` and `sending` rows of any `alert_no`; also ends their deliveries (Stopping) |
+| `recordDue` "superseded" update | unchanged for first pushes (sendable occurrences only). A new update, run for every recorded later occurrence, ends older deliveries' follow-ups and makes their unsent (`pending` or `sending`) follow-up alerts `missed` (Stopping). |
 | `reminders.list` latest outcome (`DISTINCT ON`) | Shows each recipient's row **from the reminder's latest occurrence** (`alert_no = 0`), not each member's own latest. Otherwise someone re-added after missing one occurrence would show a Got it from an older one. The row now includes the delivery `id`, which Mark done needs. |
 | send claim in `sendPending` | `ORDER BY give_up_at, id` (Sending) |
-| `reminders.recentDeliveries` | `AND d.alert_no = 0`; shows `follow_ups` and the ack state instead |
+| `reminders.recentDeliveries` | `AND d.alert_no = 0`; shows `follow_ups` and the ack state instead. Its `status <> 'cancelled'` filter also lets through cancelled rows that are acknowledged. |
 | `reminders.problems` | includes follow-up alerts that failed for good, worded "Re-alert 3 couldn't be sent" |
 | `reminders.remove`, `members.archive` pending cancel | unchanged; they already catch pending alerts |
 | `members` mirror report | `AND d.alert_no = 0` |
@@ -334,7 +362,7 @@ first push's retry included:
 
 ```sql
 SET acked_at = COALESCE(acked_at, now()), acked_by = COALESCE(acked_by, $who), ack_via = COALESCE(ack_via, $via),
-    follow_up_at = NULL, follow_up_ended = COALESCE(follow_up_ended, 'acked')
+    follow_up_at = NULL, follow_up_ended = 'acked'   -- replaces a soft 'expired'; the WHERE excludes final stops
 WHERE id = $id AND follow_up_ended IS DISTINCT FROM 'superseded' AND follow_up_ended IS DISTINCT FROM 'cancelled'
 ```
 
@@ -349,7 +377,8 @@ It is one conditional UPDATE:
 - **Apply** only when `follow_up_ended IS NULL` (not acknowledged, stopped or expired) and `from = follow_ups`
   (it was asked from the latest alert). It works even before the first push is settled. It sets the deadlines
   if they aren't set yet (Deadlines, `t0 = now`), then `follow_up_at = least(now + minutes, follow_up_horizon)`,
-  `follow_up_kind = 'snooze'`, `snoozed_from = from`, and cancels the delivery's unsent rows. An expired
+  `follow_up_kind = 'snooze'`, `snoozed_from = from`, and cancels the delivery's unsent follow-up alerts.
+  The first push follows the table under Sending. An expired
   delivery is never reopened.
 - **Replay:** `snoozed_from = from` with the snooze still pending. Nothing changes, and it answers with the
   stored time. A retry after a lost response never moves the alert again.
@@ -513,7 +542,8 @@ Each PR is kept to a few files.
   (a one-shot every minute, which runs no migrations) can land on either side of the web service's migration:
   old code after the change, or new code before it. That pass's recording fails inside its per-reminder
   savepoint and rolls back, and the reminder stays due. The next pass, a minute later, records it. Nothing is
-  lost or sent twice, but a reminder in that minute can arrive up to a minute late. The PR notes this.
+  sent twice, and a reminder in that minute can arrive up to a minute late. Only a reminder already at its
+  give-up time (12 hours late by default) could be recorded `missed` instead. The PR notes this.
 - **Phase 1 (PRs 1–3) is useful by itself.**
 - **PRs 4 and 5 ship before 6,** so a gateway that doesn't know the new fields never receives them.
 
@@ -536,7 +566,17 @@ Each PR is kept to a few files.
 - Got it while the first push is waiting to retry cancels the retry. A snooze cancels a follow-up alert waiting
   to retry. A worker holding a row that was cancelled meanwhile can't mark it sent, and nobody reclaims it.
 - A snooze shortened to the horizon, and a final nag created at `follow_up_until`, are both still sent. A
-  5-minute nag whose claim went stale is reclaimed and sent within its window.
+  stale claim on the last nag is reclaimed and sent within its window. A stale claim on an earlier 5-minute nag
+  is replaced by the next nag.
+- The last nag is sent even though creating it marks the delivery `expired`.
+- A worker that claimed a row before Got it or a snooze committed doesn't start the HTTP request (the
+  ownership check).
+- An app snooze while the first push is `sending` leaves the first push to finish. The delivery stays
+  visible to the creator.
+- A newer occurrence recorded `missed` doesn't make an older first push `missed` while that push still has
+  time to retry (a mixed `DELIVERY_GIVE_UP_HOURS` case).
+- A token tap that promotes a first push to `sent` clears the member's channel error.
+- A late Got it on an expired delivery records `acked`.
 - Follow-up alerts are sent ahead of an old backlog of first pushes (`give_up_at` order).
 - Follow-up creation never deadlocks against delete or archive. Run them concurrently and check that neither
   is aborted.
@@ -623,3 +663,22 @@ Each PR is kept to a few files.
 - **M3. List view.** It shows state from the reminder's latest occurrence and returns the delivery `id`.
 - **M4. Unique-key cutover.** The one-pass failure window during the update is described, and retried the
   next minute. The tap link moves to PR 3 alongside its page, and the `/api/ack` exemption is method-aware.
+
+**Codex round 3** found five new defects in the round-2 changes, and some round-2 fixes were only partial:
+
+1. **Expiry cancelled the last nag.** Expiry is now soft: it stops new alerts only. Only final stops cancel
+   unsent follow-up alerts.
+2. **A stale 5-minute claim is replaced before it can be reclaimed.** The plan now says so: the next alert is
+   the recovery, and the sweep recovers the last alert.
+3. **An app snooze could hide a live one-off.** An app snooze leaves the first push alone. The creator's view
+   and recent deliveries show acknowledged rows even when they are cancelled.
+4. **A missed newer occurrence could discard an older first push that still had time.** Older first pushes
+   keep today's sendable-only supersession. Only follow-ups are superseded every time.
+5. **A false "last send failed".** A token promotion now clears the channel error.
+
+The partial round-2 fixes, finished:
+
+- **H1:** the send-time check now covers first pushes and checks claim ownership.
+- **H2:** Got it replaces a soft `expired` with `acked`.
+- **M1:** the plan now says "never waits on a row lock", not "never waits".
+- **M4:** the cutover wording no longer promises "nothing is lost".
