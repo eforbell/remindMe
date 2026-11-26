@@ -1,6 +1,6 @@
 # Plan: "Until acknowledged" and snooze
 
-Status: proposed, not built. Revised after Codex review rounds 1–3 (see the end).
+Status: proposed, not built. Revised after Codex review rounds 1–4 (see the end).
 
 ## Why
 
@@ -201,10 +201,21 @@ check in a single query:
 - the row is still `sending` under **this worker's** `claim_token` (Got it or a snooze may have cancelled it
   since it was claimed);
 - for a follow-up alert, its delivery isn't acknowledged, superseded or cancelled;
-- the reminder isn't deleted.
+- the reminder isn't deleted;
+- the member is still one of the reminder's recipients. Today a first push still retrying after its
+  recipient was removed goes out anyway, which can send a private reminder's title to someone who no longer
+  sees it. This check closes that gap for every row.
 
 If any of these fails, the row isn't sent. A row this worker still owns becomes `cancelled`; one it no longer
-owns is left alone. The mirror skips follow-up alerts, and the late "Was due …" rewrite doesn't
+owns is left alone.
+
+**What actions a push offers is decided at this moment, not when the row was recorded:**
+
+- the token link (phase 1) and `category` / `action_callback` (phase 2) are added only while the delivery can
+  still use them;
+- the last nag, created as its delivery becomes `expired`, offers Got it only (`remind-me.ack-only`), because
+  Snooze would be refused;
+- an older first push still sent after its delivery was superseded carries no link and no actions. The mirror skips follow-up alerts, and the late "Was due …" rewrite doesn't
 apply to them; they carry their own wording.
 
 **Queue order changes from `scheduled_for, id` to `give_up_at, id`.** Among first pushes nothing changes while
@@ -226,23 +237,22 @@ own windows.
 - **A worker already holding a row (`sending`)** loses it. The send-time check stops the HTTP request if it
   hasn't started. `finish()` updates nothing, and the stale-claim sweep never picks it up again.
 
-**The first push is handled by where the tap came from:**
+**The first push, if still unsent, follows one rule.** Got it or a snooze, from anywhere, makes it
+`cancelled`, so it can't buzz during a snooze or after a Got it.
 
-| Tap came from | Got it | Snooze |
-|---|---|---|
-| A token (notification or tap-through page) | The first push, if unsent, becomes `sent` | Same |
-| The app | The first push, if unsent, becomes `cancelled` | The first push is left alone |
+The one exception is a token tap whose `from` is `0`, meaning it came from the first push itself. That makes
+the first push `sent` instead: the push evidently arrived, and only the push service's answer was lost.
 
-- **Why a token tap marks it `sent`:** the token came from that push, so the push arrived; only the push
-  service's answer was lost. Promoting it also clears the member's channel `last_error`, as a successful send
-  does. Otherwise the People page could keep saying the last send failed.
-- **Why the app leaves it alone on snooze:** it keeps sending or retrying as usual, so the delivery never sits
-  `cancelled` while its snooze is still live and hides from the creator's view. Arming in step 1 respects the
-  snooze's cursor.
+- **Only `from = 0` counts.** A tap from a follow-up alert proves nothing about the first push, which may
+  never have arrived.
+- **The channel error is cleared only when nothing newer has failed.** The member's channel `last_error` is
+  cleared only if its `last_error_at` is no later than this row's own last failed attempt. A newer failure on
+  another push stays visible.
 
-The card, the list, the creator's view and recent deliveries read the delivery's acknowledgement and follow-up
-fields, not its status. An acknowledged first push that is `cancelled` still shows there as "Got it".
-Follow-up creation never looks at the delivery's status.
+A delivery whose first push is `cancelled` still has its own acknowledgement and follow-up fields, and the
+views use those. The card, the list, the creator's view and recent deliveries show any `alert_no = 0` row that
+is acknowledged, has a follow-up pending, or has ended, whatever its status. An acknowledged or snoozed one-off
+therefore never drops out of the creator's view. Follow-up creation never looks at the delivery's status.
 
 ### What Remind Me can and can't promise
 
@@ -267,7 +277,7 @@ Stopping queued alerts inside the gateway would need gateway work. It isn't in t
 | **Any** later occurrence of the reminder is recorded, whether it is sent or `missed` | older deliveries (every member) `superseded`; their unsent follow-up alerts `missed` |
 | Reminder deleted | all its deliveries `cancelled`; all pending rows `cancelled` (as today) |
 | Edited with "Until acknowledged" turned off | its open deliveries `cancelled` |
-| Edited so a recipient is removed | that member's open deliveries for it `cancelled` |
+| Edited so a recipient is removed | that member's open deliveries for it `cancelled`, and all their unsent rows, the first push included; the send-time recipient check backs this up |
 | Member archived | their open deliveries `cancelled` (in `members.archive`, alongside today's pending cancel) |
 
 Each of these sets `follow_up_ended` by the final-over-soft rule (Ending reasons) and clears `follow_up_at`.
@@ -279,7 +289,8 @@ so arming in step 1 sees it.
 - **Ending older deliveries' follow-ups, and making their unsent follow-up alerts `missed`,** runs whenever a
   later occurrence is recorded, whether it is sent or `missed`.
 - **Older first pushes still retrying** keep today's rule: they are made `missed` only when the new occurrence
-  is sendable. Their `give_up_at` was stored under whatever `DELIVERY_GIVE_UP_HOURS` was set at the time, so
+  is sendable. The one change is that `sending` rows are included as well as `pending`, so the send-time
+  ownership check also stops one a worker had already claimed. Their `give_up_at` was stored under whatever `DELIVERY_GIVE_UP_HOURS` was set at the time, so
   an older push can still be in time when a newer one is already past its own.
 
 A one-off, or the last of a series, is `completed` as soon as it's recorded, and the edit API refuses
@@ -296,7 +307,7 @@ Every existing query on `deliveries` was checked:
 | `recordDue` "superseded" update | unchanged for first pushes (sendable occurrences only). A new update, run for every recorded later occurrence, ends older deliveries' follow-ups and makes their unsent (`pending` or `sending`) follow-up alerts `missed` (Stopping). |
 | `reminders.list` latest outcome (`DISTINCT ON`) | Shows each recipient's row **from the reminder's latest occurrence** (`alert_no = 0`), not each member's own latest. Otherwise someone re-added after missing one occurrence would show a Got it from an older one. The row now includes the delivery `id`, which Mark done needs. |
 | send claim in `sendPending` | `ORDER BY give_up_at, id` (Sending) |
-| `reminders.recentDeliveries` | `AND d.alert_no = 0`; shows `follow_ups` and the ack state instead. Its `status <> 'cancelled'` filter also lets through cancelled rows that are acknowledged. |
+| `reminders.recentDeliveries` | `AND d.alert_no = 0`; shows `follow_ups` and the ack state instead. Its `status <> 'cancelled'` filter also lets through cancelled rows that are acknowledged, snoozed or ended. |
 | `reminders.problems` | includes follow-up alerts that failed for good, worded "Re-alert 3 couldn't be sent" |
 | `reminders.remove`, `members.archive` pending cancel | unchanged; they already catch pending alerts |
 | `members` mirror report | `AND d.alert_no = 0` |
@@ -378,7 +389,7 @@ It is one conditional UPDATE:
   (it was asked from the latest alert). It works even before the first push is settled. It sets the deadlines
   if they aren't set yet (Deadlines, `t0 = now`), then `follow_up_at = least(now + minutes, follow_up_horizon)`,
   `follow_up_kind = 'snooze'`, `snoozed_from = from`, and cancels the delivery's unsent follow-up alerts.
-  The first push follows the table under Sending. An expired
+  The first push follows the rule under Sending. An expired
   delivery is never reopened.
 - **Replay:** `snoozed_from = from` with the snooze still pending. Nothing changes, and it answers with the
   stored time. A retry after a lost response never moves the alert again.
@@ -457,7 +468,8 @@ not the reminders list.
 ### Tap-through page
 
 For deliveries with "Until acknowledged" (and when `ackBaseUrl` is set), every alert's `open_url` is the ack
-page with the token in the fragment: `<ackBaseUrl>ack#t=<token>`.
+page with the token and the alert number in the fragment: `<ackBaseUrl>ack#t=<token>&a=<alert_no>`. The page
+sends the alert number back as `from`.
 
 - **The token stays out of server logs.** A fragment never reaches the server, so it isn't in any access log.
 - **The page:** it reads the token, POSTs `peek`, and shows the reminder with big **Got it** and **Snooze**
@@ -488,8 +500,11 @@ Only when `PUSH_ACTIONS=true` (off by default, since brrr doesn't know these fie
   **replaces** the last one in Notification Center and still sounds, so you see one notification re-alerting,
   not eight copies.
 - **`from`** is the alert's `alert_no`, for the snooze rules.
-- **The buttons send their values explicitly:** Got it posts `{token, action: "ack"}`, Snooze 10 min posts
+- **The buttons send their values explicitly:** Got it posts `{token, action: "ack", from}`, Snooze 10 min posts
   `{token, action: "snooze", minutes: 10, from}`.
+- **The categories:**
+  - `remind-me.ack-only` (Got it only) for the last nag;
+  - none at all once the delivery can't use them (Sending).
 
 ### Home Push gateway (separate repo)
 
@@ -571,11 +586,16 @@ Each PR is kept to a few files.
 - The last nag is sent even though creating it marks the delivery `expired`.
 - A worker that claimed a row before Got it or a snooze committed doesn't start the HTTP request (the
   ownership check).
-- An app snooze while the first push is `sending` leaves the first push to finish. The delivery stays
-  visible to the creator.
+- Got it or a snooze, from the app or from a follow-up alert's token, cancels an unsent first push. It never
+  buzzes during the snooze, and the delivery stays visible to the creator.
+- A token tap with `from = 0` marks an unsent first push `sent`. A tap with `from > 0` doesn't.
+- A first push still retrying after its recipient was removed is never sent. A claimed first push superseded
+  by a newer sendable occurrence isn't sent either.
+- The last nag offers Got it only. A superseded first push that is still sent carries no link or actions.
 - A newer occurrence recorded `missed` doesn't make an older first push `missed` while that push still has
   time to retry (a mixed `DELIVERY_GIVE_UP_HOURS` case).
-- A token tap that promotes a first push to `sent` clears the member's channel error.
+- A token tap that promotes a first push to `sent` clears the member's channel error, unless a newer push
+  failed since.
 - A late Got it on an expired delivery records `acked`.
 - Follow-up alerts are sent ahead of an old backlog of first pushes (`give_up_at` order).
 - Follow-up creation never deadlocks against delete or archive. Run them concurrently and check that neither
@@ -682,3 +702,18 @@ The partial round-2 fixes, finished:
 - **H2:** Got it replaces a soft `expired` with `acked`.
 - **M1:** the plan now says "never waits on a row lock", not "never waits".
 - **M4:** the cutover wording no longer promises "nothing is lost".
+
+**Codex round 4** found three medium and two low defects:
+
+1. **(Medium) Removing a recipient could still send them a private reminder.** The send-time check now
+   requires the member to still be a recipient. Removing someone cancels their unsent first push too.
+   First-push supersession now includes `sending` rows.
+2. **(Medium) An app snooze could still buzz from the first push's retry.** Got it or a snooze now cancels
+   an unsent first push from anywhere. The views show cancelled rows by their acknowledgement and follow-up
+   fields.
+3. **(Medium) A follow-up's token could falsely mark the first push `sent`.** Only a tap with `from = 0`,
+   from the first push itself, promotes it.
+4. **(Low) Pushes could offer actions that no longer work.** Actions are now decided at send time: the last
+   nag offers Got it only, and a superseded push offers none.
+5. **(Low) A promotion could clear a newer channel failure.** The error is now cleared only when nothing
+   newer has failed.
