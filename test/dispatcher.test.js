@@ -808,10 +808,69 @@ test('a snooze is capped at the horizon and still sent', { skip: db.skip }, asyn
   const d = await deliveryOf(sam);
   assert.equal(d.follow_up_horizon.toISOString(), '2026-11-04T02:00:10.000Z', '12 hours from the send');
   const out = await acks.snooze(pool, { deliveryId: d.id, minutes: 60, from: 0, now: at('2026-11-04T01:55:00Z') });
-  assert.equal(out.until, '2026-11-04T02:00:10.000Z');
-  await pass(at('2026-11-04T02:01:00Z'), sender);
-  assert.equal(sender.calls.length, 2, 'created a little after the horizon is still in time');
-  assert.equal((await acks.snooze(pool, { deliveryId: d.id, minutes: 10, from: 1, now: at('2026-11-04T02:02:00Z') })).result, 'stale', 'past the horizon');
+  assert.equal(out.until, '2026-11-04T01:58:10.000Z', 'two minutes short of the horizon, so a late pass still finds it in time');
+  await pass(at('2026-11-04T01:59:00Z'), sender);
+  assert.equal(sender.calls.length, 2);
+  assert.equal((await acks.snooze(pool, { deliveryId: d.id, minutes: 10, from: 1, now: at('2026-11-04T01:59:30Z') })).result, 'stale', 'too close to the horizon');
+});
+
+test('deadlines are hard: a follow-up still uncreated when its deadline passes is never created', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam]);
+  await pass(T0, fakeSender());
+  const d = await deliveryOf(sam);
+  // The latest a cursor is ever placed: two minutes before follow_up_until (15:00:10). The dispatcher is down
+  // until a minute after the deadline.
+  await pool.query("UPDATE deliveries SET follow_up_at = '2026-11-03T14:58:10Z' WHERE id = $1", [d.id]);
+  const sender = fakeSender();
+  await pass(at('2026-11-03T15:01:10Z'), sender);
+  assert.equal(sender.calls.length, 0);
+  assert.equal((await deliveryOf(sam)).follow_up_ended, 'expired');
+});
+
+test('the first push’s deadlines and first nag run from when it was marked sent, not when it was claimed', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam], { every: 5 });
+  const done = at('2026-11-03T14:00:18Z'); // the gateway took 8 seconds
+  let calls = 0;
+  await dispatcher.runPass(pool, { source: 'test', now: () => (calls++ < 2 ? T0 : done), sendImpl: fakeSender().sendImpl, config: CONFIG });
+  const d = await deliveryOf(sam);
+  assert.equal(d.sent_at.toISOString(), done.toISOString());
+  assert.equal(d.follow_up_at.toISOString(), minutes(done, 5).toISOString());
+  assert.equal(d.follow_up_until.toISOString(), minutes(done, 60).toISOString());
+});
+
+test('a pass that runs before migration 0006 is applied claims nothing', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await reminders.create(pool, { text: 'Queued', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  await pool.query("DELETE FROM schema_migrations WHERE filename = '0006_ack_and_snooze.sql'");
+  try {
+    const sender = fakeSender();
+    const s = await pass(T0, sender);
+    assert.equal(s.waiting_for_migration, true);
+    assert.equal(sender.calls.length, 0);
+    assert.equal((await deliveries()).length, 0, 'nothing recorded or claimed');
+  } finally {
+    await pool.query("INSERT INTO schema_migrations (filename) VALUES ('0006_ack_and_snooze.sql') ON CONFLICT DO NOTHING");
+  }
+  const sender = fakeSender();
+  await pass(minutes(T0, 1), sender);
+  assert.equal(sender.calls.length, 1, 'sent once the migration is in');
+});
+
+test('Got it never deadlocks against archiving the person', { skip: db.skip }, async () => {
+  for (let i = 0; i < 15; i += 1) {
+    const [sam, riley] = await household();
+    await reminders.create(pool, { text: 'One-off', date: '2026-11-03', time: '09:00', recipients: [sam.id, riley.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+    await pass(T0, fakeSender({ fail: () => true })); // a completed one-off whose first pushes wait to retry
+    const d = await deliveryOf(riley);
+    const results = await Promise.allSettled([
+      acks.ack(pool, { deliveryId: d.id, who: riley.id, via: 'app', now: minutes(T0, 1) }),
+      members.archive(pool, riley.id, { force: true }),
+      acks.ack(pool, { deliveryId: (await deliveryOf(sam)).id, who: riley.id, via: 'app', now: minutes(T0, 1) }),
+    ]);
+    for (const r of results) assert.equal(r.status, 'fulfilled', r.reason?.message);
+  }
 });
 
 test('a newer occurrence, even one recorded missed, ends older follow-ups and their unsent alerts', { skip: db.skip }, async () => {

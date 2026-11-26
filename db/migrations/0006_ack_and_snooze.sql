@@ -38,6 +38,9 @@ ALTER TABLE deliveries
   ADD COLUMN acked_at           TIMESTAMPTZ,
   ADD COLUMN acked_by           INT REFERENCES family_members(id),
   ADD COLUMN ack_via            TEXT CHECK (ack_via IN ('notification', 'link', 'app')),
+  -- When this row's last attempt failed (any row). A Got it that marks an unsent first push sent clears the
+  -- member's channel error only if nothing failed after this.
+  ADD COLUMN last_failed_at     TIMESTAMPTZ,
   ADD CONSTRAINT deliveries_alert_kind CHECK (alert_no = 0 OR alert_kind IS NOT NULL),
   ADD CONSTRAINT deliveries_realert_pair CHECK ((realert_every_min IS NULL) = (realert_for_min IS NULL)),
   -- An endless loop can't be stored: a pending nag always has a deadline, every pending follow-up a horizon.

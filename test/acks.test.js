@@ -151,11 +151,33 @@ test('a token tap that marks the first push sent clears the channel error, unles
   assert.equal(c.last_error, 'a newer push failed');
 });
 
+test('a token snooze without the alert number is refused and changes nothing', { skip: db.skip }, async () => {
+  const { d, token } = await setup({ sender: failing });
+  await assert.rejects(acks.byToken(pool, { token, action: 'snooze', minutes: 10, now: at('2026-11-03T14:00:40Z') }), /which alert/);
+  const { rows: [after] } = await pool.query('SELECT status, follow_up_at FROM deliveries WHERE id = $1', [d.id]);
+  assert.deepEqual(after, { status: 'pending', follow_up_at: null }, 'the first push is not cancelled');
+});
+
+test('a newer failure on another push survives a token tap, even after the tapped push was claimed again', { skip: db.skip }, async () => {
+  const { sam, d, token } = await setup({ sender: failing }); // push A fails at 14:00:10
+  // Push B, another reminder, fails later.
+  await reminders.create(pool, { text: 'Other', date: '2026-11-03', time: '09:15', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  await dispatcher.runPass(pool, { source: 'test', now: () => at('2026-11-03T14:15:10Z'), sendImpl: failing.sendImpl, config: CONFIG });
+  // A is claimed for a retry (its updated_at moves on), then the phone's tap from A's first push arrives.
+  await pool.query("UPDATE deliveries SET status = 'sending', claim_token = gen_random_uuid(), claimed_at = now(), updated_at = now() WHERE id = $1", [d.id]);
+  await acks.byToken(pool, { token, action: 'ack', from: 0, now: at('2026-11-03T14:16:00Z') });
+  const { rows: [c] } = await pool.query('SELECT last_error FROM member_notification_channels WHERE member_id = $1', [sam.id]);
+  assert.match(c.last_error, /503/, 'B’s failure is still shown');
+  const { rows: [a] } = await pool.query('SELECT status FROM deliveries WHERE id = $1', [d.id]);
+  assert.equal(a.status, 'sent');
+});
+
 test('snooze validates minutes and from', { skip: db.skip }, async () => {
   const { d } = await setup({ ack: false });
   await assert.rejects(acks.snooze(pool, { deliveryId: d.id, minutes: 7, from: 0 }), /10, 30 or 60/);
   await assert.rejects(acks.snooze(pool, { deliveryId: d.id, minutes: 10, from: -1 }), /which alert/);
   await assert.rejects(acks.snooze(pool, { deliveryId: d.id, minutes: 10 }), /which alert/);
+  await assert.rejects(acks.snooze(pool, { deliveryId: d.id, minutes: 10, from: '' }), /which alert/);
   await assert.rejects(acks.ack(pool, { deliveryId: d.id, who: null, via: 'telepathy' }), /source/);
 });
 
