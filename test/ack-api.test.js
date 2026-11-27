@@ -382,6 +382,8 @@ test('archiving never deadlocks with delete or with recording the next occurrenc
       dispatcher.runPass(pool, { source: 'test', now: () => clock, sendImpl: async () => ({ status: 200 }), config: CONFIG }),
     ]);
     for (const x of results) assert.equal(x.status, 'fulfilled', x.reason?.message);
+    assert.equal(results[1].value.recordErrors, 0, 'the dispatcher recorded the occurrence (it catches its own deadlocks)');
+    assert.ok(await deliveryOf(sam, 1), 'the next occurrence was recorded');
     assert.equal((await deliveryOf(riley)).status, 'cancelled');
   }
 });
@@ -428,4 +430,93 @@ test('a one-off never sent because its recipient was archived stays in its creat
   clock = at('2026-11-04T14:10:00Z');
   const recent = (await call(sam, 'GET', 'api/deliveries')).data.deliveries;
   assert.deepEqual(recent.map((d) => [d.status, d.follow_up_ended]), [['cancelled', 'cancelled']]);
+});
+
+test('archiving never waits on a reminder just saved with them on it while it holds them', { skip: db.skip }, async () => {
+  // Archive's first look misses a reminder; a save puts Riley on it; archive locks Riley; the dispatcher takes the
+  // reminder and, recording Riley's delivery, needs Riley (its foreign key). Archive must not wait for the reminder.
+  await household();
+  const id = await create({ ack_required: false, recipients: [sam.id], repeat: { freq: 'daily', count: null } });
+  let dispatcherSide = null;
+  let held = null;
+  const onStep = async (step) => {
+    if (step === 'scanned' && !dispatcherSide) {
+      await pool.query('INSERT INTO reminder_recipients (reminder_id, member_id) VALUES ($1, $2)', [id, riley.id]);
+      dispatcherSide = await pool.connect();
+      await dispatcherSide.query('BEGIN');
+      await dispatcherSide.query('SELECT id FROM reminders WHERE id = $1 FOR UPDATE', [id]);
+    } else if (step === 'locked' && dispatcherSide && !held) {
+      // What inserting Riley's delivery does: a KEY SHARE lock on Riley, which waits for archive.
+      held = dispatcherSide.query('SELECT id FROM family_members WHERE id = $1 FOR KEY SHARE', [riley.id])
+        .then(() => dispatcherSide.query('COMMIT'));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  try {
+    const results = await Promise.allSettled([members.archive(pool, riley.id, { force: true, onStep }), (async () => {
+      while (!held) await new Promise((r) => setTimeout(r, 10));
+      return held;
+    })()]);
+    for (const x of results) assert.equal(x.status, 'fulfilled', x.reason?.message);
+  } finally {
+    dispatcherSide?.release();
+  }
+  const { rows } = await pool.query('SELECT member_id FROM reminder_recipients WHERE reminder_id = $1', [id]);
+  assert.deepEqual(rows.map((r) => r.member_id), [sam.id], 'Riley came off it');
+});
+
+test('archiving takes back a first push in flight after turning it off ended its loop', { skip: db.skip }, async () => {
+  await household();
+  const id = await create({ recipients: [riley.id], repeat: { freq: 'daily', count: null } });
+  let release;
+  const sending = passAt(FIRE, () => new Promise((resolve, reject) => { release = { resolve, reject }; }));
+  while (!release) await new Promise((r) => setTimeout(r, 10));
+  assert.equal((await deliveryOf(riley)).status, 'sending');
+  const { rows: [r] } = await pool.query('SELECT version FROM reminders WHERE id = $1', [id]);
+  const off = await call(sam, 'PUT', `api/reminders/${id}`, body({ date: '2026-11-05', recipients: [riley.id], ack_required: false, repeat: { freq: 'daily', count: null }, version: r.version }));
+  assert.equal(off.status, 200, JSON.stringify(off.data));
+  assert.equal((await deliveryOf(riley)).follow_up_ended, 'cancelled');
+  await members.archive(pool, riley.id, { force: true });
+  release.reject(new Error('brrr answered 503'));
+  await sending;
+  const d = await deliveryOf(riley);
+  assert.equal(d.status, 'cancelled', 'not put back to retry');
+  assert.equal(d.next_attempt_at, null);
+});
+
+test('an app action already past its first check answers not found once its person is archived', { skip: db.skip }, async () => {
+  await household();
+  await create({ recipients: [riley.id] });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  await acks.ack(pool, { deliveryId: d.id, who: riley.id, via: 'app', now: at('2026-11-04T14:01:00Z') });
+  // Archive holds Riley while the tap arrives; the tap waits for Riley, then must see the archive.
+  const hold = await pool.connect();
+  try {
+    await hold.query('BEGIN');
+    await hold.query('SELECT id FROM family_members WHERE id = $1 FOR UPDATE', [riley.id]);
+    clock = at('2026-11-04T14:05:00Z');
+    const tap = call(riley, 'POST', `api/deliveries/${d.id}/ack`, {});
+    await new Promise((r) => setTimeout(r, 150));
+    await hold.query("UPDATE family_members SET archived_at = now() WHERE id = $1", [riley.id]);
+    await hold.query('COMMIT');
+    const res = await tap;
+    assert.equal(res.status, 404, JSON.stringify(res.data));
+    assert.equal(JSON.stringify(res.data).includes('Take medicine'), false);
+  } finally {
+    hold.release();
+  }
+});
+
+test('Mark done on a delivery that was stopped answers gone, not not-found', { skip: db.skip }, async () => {
+  await household();
+  const id = await create({ recipients: [riley.id], visibility: 'family', repeat: { freq: 'daily', count: null } });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const { rows: [r] } = await pool.query('SELECT version FROM reminders WHERE id = $1', [id]);
+  const off = await call(sam, 'PUT', `api/reminders/${id}`, body({ date: '2026-11-05', recipients: [riley.id], ack_required: false, visibility: 'family', repeat: { freq: 'daily', count: null }, version: r.version }));
+  assert.equal(off.status, 200, JSON.stringify(off.data));
+  const res = await call(sam, 'POST', `api/deliveries/${d.id}/ack`, {});
+  assert.equal(res.status, 200, JSON.stringify(res.data));
+  assert.deepEqual(res.data, { result: 'gone' });
 });
