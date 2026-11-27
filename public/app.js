@@ -13,23 +13,43 @@
     { value: 'private', label: 'Private', help: 'Only you and the people it reminds can see it.' },
     { value: 'family', label: 'Whole family', help: 'Everyone sees it coming. Only the people it reminds get the push.' },
   ];
+  // "Until acknowledged" (docs/plan-ack-and-snooze.md): re-alert every N minutes, give up after M.
+  const REALERT_EVERY = [5, 10, 15, 30];
+  const REALERT_FOR = [{ value: 60, label: '1 hour' }, { value: 240, label: '4 hours' }, { value: 720, label: '12 hours' }];
+  const ACK_DEFAULT = { on: false, every: 15, for: 240 };
+  const SNOOZE = [{ minutes: 10, label: '10 min' }, { minutes: 30, label: '30 min' }, { minutes: 60, label: '1 hour' }];
 
-  const state = { config: null, members: [], reminders: [], problems: [], health: null, who: null, loaded: false };
+  const state = { config: null, members: [], reminders: [], problems: [], waiting: [], health: null, who: null, loaded: false };
+  let snoozeOpen = null; // the waiting delivery whose snooze choices are showing
+  const acting = new Set(); // deliveries with a Got it, snooze or Mark done in flight (no second request)
+  // Only the newest load() is applied: switching who uses this phone mid-load must never bring back the previous
+  // person's Waiting card (a tap on it would act as the new person). state.viewer is who the data was loaded as.
+  let loadGen = 0;
+  let recentGen = 0; // likewise for Recently sent, fetched on its own when Scheduled opens
+  const viewerNow = () => (RM.tailnet() ? null : RM.getMe());
 
   // ── Data ─────────────────────────────────────────────────────────────────
+  // true once this call's data is on screen, false if it failed, null if a newer call replaced it (that one draws).
   async function load() {
+    const gen = ++loadGen;
+    const asViewer = viewerNow();
     try {
       const [config, m, r, health, who] = await Promise.all([
         api('api/config'), api('api/members'), api('api/reminders'), api('api/health').catch(() => null),
         state.who || RM.loadWho(),
       ]);
+      if (gen !== loadGen) return null;
       state.who = who;
+      // Who the server took this as: in tailnet mode the header is ignored (only learnt with `who`, so a stale
+      // local pick from before switching modes must not count).
+      state.viewer = RM.tailnet() ? null : asViewer;
       // A kid's household account: the People page is a parent's, so its links and controls are hidden.
       document.body.classList.toggle('suite-kid', RM.isKid());
       state.config = config;
       state.members = m.members;
       state.reminders = r.reminders;
       state.problems = r.problems || [];
+      state.waiting = r.waiting || [];
       state.health = health;
       state.loaded = true;
       const me = RM.getMe();
@@ -42,9 +62,14 @@
       renderHome();
       if (!$('scheduled').classList.contains('hidden')) renderScheduled();
       maybeAskWho();
+      return true;
     } catch (err) {
+      if (gen !== loadGen) return null;
       $('next-body').innerHTML = `<span class="muted">${esc(err.message)}</span>`;
       $('status-line').textContent = '';
+      // Whichever load failed last redraws the action buttons from what's on hand, so none stays disabled.
+      if (state.loaded) redrawActions();
+      return false;
     }
   }
 
@@ -90,9 +115,66 @@
         : `<div class="next-empty">Nothing scheduled.</div><div class="next-people">Tap <strong>New reminder</strong> to set one.</div>`);
 
     renderBanners(today);
+    renderWaiting();
     renderMeChip();
     renderStatus();
   }
+
+  // ── Waiting on you ───────────────────────────────────────────────────────
+  // The viewer's own deliveries that want a Got it (or may be snoozed): above Next up, so they can't sink.
+  const timeOf = (iso) => core.formatTime12(RM.wallOfIso(iso, state.config.timezone).time);
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+  function waitingMeta(w) {
+    const due = `Due ${timeOf(w.scheduled_for)}`;
+    if (w.ended === 'expired') return `${due} · <span class="ds-warn">not acknowledged</span>`;
+    if (w.next_alert_kind === 'snooze' && w.next_alert_at) return `${due} · snoozed until ${timeOf(w.next_alert_at)}`;
+    if (w.ack_required) return w.follow_ups ? `${due} · ${plural(w.follow_ups, 're-alert')}` : `${due} · re-alerts until Got it`;
+    return `${due} · went off`;
+  }
+
+  function renderWaiting() {
+    const list = state.waiting;
+    $('waiting').classList.toggle('hidden', !list.length);
+    $('waiting-list').innerHTML = list.map((w) => {
+      const off = acting.has(w.id) ? ' disabled' : '';
+      return `
+      <article class="wait-item ${w.ack_required ? 'is-ack' : ''}" data-delivery="${w.id}">
+        <div class="wait-text">${esc(w.title)}</div>
+        <div class="wait-meta">${waitingMeta(w)}</div>
+        <div class="wait-actions">
+          ${w.can_ack && w.ack_required ? `<button type="button" class="btn-solid wait-btn" data-wact="ack" data-delivery="${w.id}"${off}>Got it</button>` : ''}
+          ${w.can_snooze ? `<button type="button" class="btn-ghost wait-btn" data-wact="snooze-open" data-delivery="${w.id}" aria-expanded="${snoozeOpen === w.id}"${off}>Snooze ▾</button>` : ''}
+        </div>
+        ${snoozeOpen === w.id && w.can_snooze ? `<div class="wait-snooze" role="group" aria-label="Snooze for">${SNOOZE.map((s) => `<button type="button" class="chip-btn" data-wact="snooze" data-delivery="${w.id}" data-minutes="${s.minutes}"${off}>${s.label}</button>`).join('')}</div>` : ''}
+      </article>`;
+    }).join('');
+  }
+
+  $('waiting-list').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-wact]');
+    if (!b || b.disabled) return;
+    const id = Number(b.dataset.delivery);
+    const w = state.waiting.find((x) => x.id === id);
+    if (!w) return;
+    if (b.dataset.wact === 'snooze-open') {
+      snoozeOpen = snoozeOpen === id ? null : id;
+      renderWaiting();
+      return;
+    }
+    await deliveryAction(id, async () => {
+      if (b.dataset.wact === 'ack') {
+        const out = await api(`api/deliveries/${id}/ack`, { method: 'POST', body: {} });
+        toast(out.result === 'gone' ? 'That one was stopped meanwhile.' : 'Got it', out.result === 'gone' ? 'bad' : 'ok');
+      } else {
+        // From the latest alert, as the waiting list showed it: a stale answer means it changed meanwhile.
+        const out = await api(`api/deliveries/${id}/snooze`, { method: 'POST', body: { minutes: Number(b.dataset.minutes), from: w.alert_no } });
+        toast(out.result === 'snoozed' ? `Snoozed until ${timeOf(out.until)}`
+          : out.result === 'gone' ? 'That one was stopped meanwhile.' : 'It changed meanwhile. Here’s the latest.', out.result === 'snoozed' ? 'ok' : 'bad');
+      }
+      if (snoozeOpen === id) snoozeOpen = null; // another delivery's chooser stays open
+    });
+  });
 
   function renderStatus() {
     const d = state.health?.dispatcher;
@@ -172,14 +254,44 @@
   $('whoami-list').addEventListener('click', (e) => {
     const b = e.target.closest('[data-id]');
     if (!b) return;
-    RM.setMe(Number(b.dataset.id));
+    const picked = Number(b.dataset.id);
+    const changed = picked !== RM.getMe();
+    RM.setMe(picked);
     closeSheet($('whoami'));
-    // What you see depends on who you are: fetch your reminders.
+    // What you see depends on who you are: the previous person's Waiting card goes now, then fetch yours.
+    if (changed) {
+      state.waiting = [];
+      snoozeOpen = null;
+      if (state.loaded) renderWaiting();
+    }
     load();
   });
   $('me-btn').addEventListener('click', () => { if (!RM.tailnet()) openWho(); });
 
   // Banner and list actions (event delegation).
+  // A Got it, snooze or Mark done: one at a time per delivery, only for whoever the screen was loaded as, and
+  // always followed by a reload (which redraws the buttons, re-enabled), whether it worked or not.
+  async function deliveryAction(id, run) {
+    if (acting.has(id)) return;
+    if (viewerNow() !== state.viewer) { await load(); return; }
+    acting.add(id);
+    renderWaiting();
+    try {
+      await run();
+    } catch (err) {
+      toast(err.message, 'bad');
+    } finally {
+      acting.delete(id);
+    }
+    // The reload redraws the buttons, or, if the newest load fails, load() redraws them from what's on hand.
+    await load();
+  }
+
+  function redrawActions() {
+    renderWaiting();
+    if (!$('scheduled').classList.contains('hidden')) renderScheduled();
+  }
+
   async function act(action, id) {
     const r = state.reminders.find((x) => x.id === id);
     if (!r) return;
@@ -227,6 +339,8 @@
       const name = memberById(d.member_id)?.name || 'someone';
       const w = RM.wallOfIso(d.sent_at || d.scheduled_for, tz);
       const when = RM.whenText(w.date, w.time, today);
+      const ack = ackLine(r, d, name);
+      if (ack) return ack;
       switch (d.status) {
         case 'sent': return `<span class="ds ds-ok">✓ ${esc(name)}, ${esc(when)}</span>`;
         case 'pending':
@@ -241,6 +355,35 @@
     return `<div class="rem-deliveries"><span class="rem-label">Last time</span>${parts.join('')}</div>`;
   }
 
+  // An "Until acknowledged" delivery's state, or '' to show its push status as usual. Whoever set the reminder can
+  // clear it for someone still being re-alerted ("Mark done for Riley").
+  function ackLine(r, d, name) {
+    if (!d.ack_required) return '';
+    const by = d.acked_by && d.acked_by !== d.member_id ? ` (by ${esc(memberById(d.acked_by)?.name || 'someone')})` : '';
+    if (d.acked_at) return `<span class="ds ds-ok">✓ ${esc(name)}: got it ${esc(timeOf(d.acked_at))}${by}</span>`;
+    const open = !d.follow_up_ended && (d.status === 'sent' || d.follow_ups > 0 || d.next_alert_at);
+    const expired = d.follow_up_ended === 'expired';
+    if (!open && !expired) return '';
+    const mark = r.created_by != null && r.created_by === RM.getMe() && d.member_id !== RM.getMe()
+      ? ` <button type="button" class="btn-ghost btn-xs" data-mark="${d.id}" data-name="${esc(name)}"${acting.has(d.id) ? ' disabled' : ''}>Mark done for ${esc(name)}</button>` : '';
+    return expired
+      ? `<span class="ds ds-warn">! ${esc(name)}: not acknowledged${mark}</span>`
+      : `<span class="ds ds-warn">… ${esc(name)}: ${d.next_alert_kind === 'snooze' && d.next_alert_at ? `snoozed until ${esc(timeOf(d.next_alert_at))}`
+        : `waiting${d.follow_ups ? ` · ${plural(d.follow_ups, 're-alert')}` : ''}`}${mark}</span>`;
+  }
+
+  // "Mark done for Riley", from the list or recent deliveries: recorded as acknowledged by the viewer.
+  document.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-mark]');
+    if (!b || b.disabled) return;
+    const id = Number(b.dataset.mark);
+    b.disabled = true;
+    await deliveryAction(id, async () => {
+      const out = await api(`api/deliveries/${id}/ack`, { method: 'POST', body: {} });
+      toast(out.result === 'gone' ? 'That one was stopped meanwhile.' : `Marked done for ${b.dataset.name}`, out.result === 'gone' ? 'bad' : 'ok');
+    });
+  });
+
   function reminderCard(r, today) {
     const level = LEVEL[r.level];
     const bounded = r.repeat.freq !== 'once' && r.remaining != null;
@@ -250,7 +393,7 @@
       <article class="rem-card ${r.ending_soon ? 'is-ending' : ''}" data-id="${r.id}">
         <div class="rem-top">
           <h3 class="rem-text">${esc(r.text)}</h3>
-          <span class="rem-pills">${r.visibility === 'family' ? '<span class="seen-pill">Whole family</span>' : ''}<span class="level-pill level-${esc(r.level)}">${esc(level?.label || r.level)}</span></span>
+          <span class="rem-pills">${r.ack_required ? '<span class="ack-pill">Until acknowledged</span>' : ''}${r.visibility === 'family' ? '<span class="seen-pill">Whole family</span>' : ''}<span class="level-pill level-${esc(r.level)}">${esc(level?.label || r.level)}</span></span>
         </div>
         <div class="rem-when"><span class="rem-label">Next</span>${esc(RM.whenText(r.next.date, r.next.time, today))} <span class="muted">· ${esc(untilText(r.next.at))}</span></div>
         <div class="rem-repeat"><span class="rem-label">Repeat</span>${esc(repeatText)}${bounded && r.last ? `<span class="muted"> · last ${esc(RM.whenText(r.last.date, r.last.time, today))}</span>` : ''}</div>
@@ -273,18 +416,39 @@
       : `<div class="empty-state"><h3>Nothing scheduled</h3><p>New reminders show up here until they’re sent.</p>
          <div class="form-actions"><button type="button" class="btn-solid" id="empty-new">New reminder</button></div></div>`;
     $('empty-new')?.addEventListener('click', () => { closeSheet($('scheduled')); openComposer(); });
+    const gen = ++recentGen;
+    const asViewer = viewerNow();
     try {
       const { deliveries } = await api('api/deliveries?limit=15');
+      if (gen !== recentGen || viewerNow() !== asViewer) return; // a newer request, or another person, owns the list
       const tz = state.config.timezone;
       $('recent').classList.toggle('hidden', !deliveries.length);
       $('recent-list').innerHTML = deliveries.map((d) => {
         const w = RM.wallOfIso(d.sent_at || d.scheduled_for, tz);
         const icon = { sent: '✓', failed: '✕', missed: '–', pending: '↻', sending: '…' }[d.status] || '';
+        const ack = d.ack_required || d.acked_at ? recentAck(d) : '';
+        const status = d.status === 'sent' || (d.status === 'cancelled' && ack) ? ''
+          : ` · ${esc({ pending: 'retrying', sending: 'sending', failed: 'not delivered', missed: 'missed', cancelled: 'not sent' }[d.status] || d.status)}`;
         return `<li class="recent-item st-${esc(d.status)}"><span class="recent-icon">${icon}</span>
           <span class="recent-main"><span class="recent-text">${esc(d.text)}</span>
-          <span class="recent-meta">${esc(d.member_name)} · ${esc(RM.whenText(w.date, w.time, today))}${d.status === 'sent' ? '' : ` · ${esc({ pending: 'retrying', sending: 'sending', failed: 'not delivered', missed: 'missed' }[d.status] || d.status)}`}</span></span></li>`;
+          <span class="recent-meta">${esc(d.member_name)} · ${esc(RM.whenText(w.date, w.time, today))}${status}${ack}</span></span></li>`;
       }).join('');
-    } catch { $('recent').classList.add('hidden'); }
+    } catch { if (gen === recentGen) $('recent').classList.add('hidden'); }
+  }
+
+  // A recent delivery's acknowledgement, with "Mark done" for whoever set it while it's still waiting (this is
+  // where a finished one-off is reached).
+  function recentAck(d) {
+    if (d.acked_at) return ` · <span class="ds-ok">got it ${esc(timeOf(d.acked_at))}</span>`;
+    const expired = d.follow_up_ended === 'expired';
+    const open = !d.follow_up_ended && (d.status === 'sent' || d.follow_ups > 0 || d.next_alert_at);
+    if (!expired && !open) return '';
+    const me = RM.getMe();
+    const mark = me != null && d.created_by === me && d.member_id !== me
+      ? ` <button type="button" class="btn-ghost btn-xs" data-mark="${d.id}" data-name="${esc(d.member_name)}"${acting.has(d.id) ? ' disabled' : ''}>Mark done</button>` : '';
+    const what = expired ? 'not acknowledged'
+      : d.next_alert_kind === 'snooze' && d.next_alert_at ? `snoozed until ${esc(timeOf(d.next_alert_at))}` : 'waiting';
+    return ` · <span class="ds-warn">${what}</span>${mark}`;
   }
 
   $('list-btn').addEventListener('click', () => {
@@ -324,6 +488,7 @@
       date: slot.date, time: slot.time,
       freq: 'once', every: 1, weekdays: new Set([core.weekdayOf(slot.date)]), weekdaysAuto: true,
       ends: 'after', count: core.DEFAULT_COUNTS.daily, level: state.config.default_level, visibility: 'private',
+      ack: { ...ACK_DEFAULT }, ackNote: '',
       anchor: null, anchorFreq: null, anchorEvery: null, origDate: null, droppedNames: [],
     });
     const d = core.parseDate(c.date);
@@ -344,6 +509,7 @@
       every: rep.every || 1,
       level: r.level,
       visibility: r.visibility === 'family' ? 'family' : 'private',
+      ack: { on: Boolean(r.ack_required), every: r.realert_every_min || ACK_DEFAULT.every, for: r.realert_for_min || ACK_DEFAULT.for },
       ends: rep.freq !== 'once' && rep.count == null ? 'never' : 'after',
       count: rep.freq === 'once' ? core.DEFAULT_COUNTS.daily : (rep.count ?? core.DEFAULT_COUNTS[rep.freq]),
     });
@@ -403,6 +569,7 @@
     renderTime();
     renderRepeat();
     renderLevels();
+    renderAck();
     renderSeen();
     renderReadout();
     $('what-clear').classList.toggle('hidden', !c.text);
@@ -706,7 +873,55 @@
     const b = e.target.closest('[data-level]');
     if (!b) return;
     c.level = b.dataset.level;
+    // Passive makes no sound, so re-alerting with it would be pointless (the server refuses the pair).
+    c.ackNote = c.level === 'passive' && c.ack.on ? `${LEVEL.passive?.label || 'Quiet'} makes no sound, so “Until acknowledged” is off.` : '';
+    if (c.level === 'passive') c.ack.on = false;
     renderLevels();
+    renderAck();
+    renderReadout();
+  });
+
+  // "Until acknowledged": a switch under Alert, and when it's on, how often and for how long.
+  function renderAck() {
+    const { on, every } = c.ack;
+    const seg = (label, items, key) => `
+      <div class="ack-row"><span class="ack-key">${label}</span>
+        <div class="segmented seg-ack" role="radiogroup" aria-label="${label}">${items.map((it) => `
+          <button type="button" role="radio" aria-checked="${c.ack[key] === it.value}" class="${c.ack[key] === it.value ? 'is-on' : ''}" data-ack-${key}="${it.value}">${esc(it.label)}</button>`).join('')}
+        </div></div>`;
+    $('ack-field').innerHTML = `
+      <button type="button" class="ack-toggle ${on ? 'is-on' : ''}" role="switch" aria-checked="${on}" data-ack-toggle>
+        <span class="ack-toggle-text"><span class="ack-toggle-name">Until acknowledged</span>
+          <span class="ack-toggle-hint">${on ? `Re-alerts every ${every} min until they tap Got it.` : 'Keep re-alerting until they tap Got it.'}</span></span>
+        <span class="switch" aria-hidden="true"><i></i></span>
+      </button>
+      ${on ? `<div class="ack-opts">
+        ${seg('Re-alert every', REALERT_EVERY.map((m) => ({ value: m, label: `${m} min` })), 'every')}
+        ${seg('Give up after', REALERT_FOR, 'for')}
+      </div>` : ''}
+      ${c.ackNote ? `<p class="field-help">${esc(c.ackNote)}</p>` : ''}`;
+  }
+
+  $('ack-field').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.hasAttribute('data-ack-toggle')) {
+      c.ack.on = !c.ack.on;
+      c.ackNote = '';
+      // Turning it on with Passive picked switches to the default level, which makes a sound.
+      if (c.ack.on && c.level === 'passive') {
+        c.level = state.config.default_level;
+        c.ackNote = `Alert set to ${LEVEL[c.level]?.label || c.level}: ${LEVEL.passive?.label || 'Quiet'} makes no sound.`;
+        renderLevels();
+      }
+    } else if (b.dataset.ackEvery) {
+      c.ack.every = Number(b.dataset.ackEvery);
+    } else if (b.dataset.ackFor) {
+      c.ack.for = Number(b.dataset.ackFor);
+    } else {
+      return;
+    }
+    renderAck();
     renderReadout();
   });
 
@@ -742,6 +957,10 @@
     parts.push(RM.whenText(first, c.time, today));
     if (c.freq !== 'once') parts.push(core.describeRepeat(currentRule(), anchorDate()).replace(/^./, (x) => x.toLowerCase()));
     parts.push(level.toLowerCase());
+    if (c.ack.on) {
+      const tapper = who.length === 1 ? (who[0].id === RM.getMe() ? 'you tap' : `${who[0].name} taps`) : 'each taps';
+      parts.push(`re-alerts every ${c.ack.every} min until ${tapper} Got it`);
+    }
     if (c.visibility === 'family') parts.push('the whole family sees it');
     $('composer-summary').innerHTML = `${c.text.trim() ? `<strong>${esc(c.text.trim())}</strong><br>` : ''}${esc(parts.join(' · '))}`;
     const p = problem();
@@ -832,6 +1051,16 @@
       c.date = slot.date;
     }
     if (s.level && LEVEL[s.level]) c.level = s.level;
+    // A suggestion remembers "Until acknowledged" with its pattern (older ones don't say, and leave it alone).
+    if (s.repeat && 'ack' in s.repeat) {
+      c.ack = s.repeat.ack ? { on: true, every: s.repeat.ack.every, for: s.repeat.ack.for } : { ...c.ack, on: false };
+      if (c.ack.on && c.level === 'passive') c.level = state.config.default_level;
+    }
+    // An older suggestion (no ack) that picks Quiet: Quiet never re-alerts, so the switch goes off with it.
+    if (c.level === 'passive' && c.ack.on) {
+      c.ack = { ...c.ack, on: false };
+      c.ackNote = `${LEVEL.passive?.label || 'Quiet'} makes no sound, so “Until acknowledged” is off.`;
+    }
     if (s.repeat?.freq) {
       c.freq = s.repeat.freq;
       c.every = s.repeat.every || 1;
@@ -930,6 +1159,8 @@
       visibility: c.visibility,
       repeat: currentRule(),
       created_by: RM.getMe(),
+      ack_required: c.ack.on && c.level !== 'passive',
+      ...(c.ack.on && c.level !== 'passive' ? { realert_every_min: c.ack.every, realert_for_min: c.ack.for } : {}),
     };
     if (c.mode !== 'edit' && anchorDate() !== c.date) body.anchor = anchorDate();
     const btn = $('schedule-btn');

@@ -415,3 +415,43 @@ button:disabled { cursor: default; }
 .ack-snooze-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .ack-snooze-row .chip-btn { min-height: var(--tap); font-size: var(--text-md); font-weight: 600; }
 .ack-note:empty { display: none; }
+
+/* ── Until acknowledged: "Waiting on you", the composer switch, list states ── */
+.waiting {
+  border-radius: var(--radius-lg); padding: var(--s-4); display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 55%, var(--border));
+  background: color-mix(in srgb, var(--amber) 10%, var(--surface)); box-shadow: var(--shadow-card);
+}
+.waiting-list { display: flex; flex-direction: column; gap: 10px; }
+.wait-item { display: flex; flex-direction: column; gap: 6px; }
+.wait-item + .wait-item { border-top: 1px solid var(--border-subtle); padding-top: 10px; }
+.wait-text { font-size: var(--text-lg); font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.wait-meta { font-size: var(--text-sm); color: var(--muted); }
+.wait-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.wait-btn { min-height: var(--tap); flex: 1; font-size: var(--text-md); }
+.wait-snooze { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.wait-snooze .chip-btn { min-height: var(--tap); font-weight: 600; }
+
+.ack-field { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.ack-field:empty { display: none; }
+.ack-toggle {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; width: 100%;
+  min-height: var(--tap); padding: 10px 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--surface);
+}
+.ack-toggle.is-on { border-color: var(--accent); background: var(--accent-soft); }
+.ack-toggle-text { display: flex; flex-direction: column; gap: 2px; }
+.ack-toggle-name { font-weight: 700; color: var(--text); }
+.ack-toggle-hint { font-size: 12px; line-height: 1.35; color: var(--muted); }
+.switch { flex-shrink: 0; width: 46px; height: 28px; border-radius: 14px; background: var(--surface3); border: 1px solid var(--border); position: relative; transition: background .15s; }
+.switch i { position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.3); transition: transform .15s; }
+.ack-toggle.is-on .switch { background: var(--accent-solid); border-color: var(--accent-solid); }
+.ack-toggle.is-on .switch i { transform: translateX(18px); }
+.ack-opts { display: flex; flex-direction: column; gap: 10px; }
+.ack-row { display: flex; flex-direction: column; gap: 6px; }
+.ack-key { font-size: var(--text-sm); color: var(--muted); font-weight: 600; }
+.seg-ack button { padding: 0 4px; }
+
+.ack-pill { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: var(--radius-pill); white-space: nowrap;
+  background: color-mix(in srgb, var(--amber) 18%, var(--surface)); color: var(--amber); }
+.btn-xs { min-height: 30px; padding: 3px 10px; font-size: 12px; margin-left: 4px; max-width: 100%; white-space: normal; text-align: left; }
+.rem-deliveries .ds { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
