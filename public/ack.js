@@ -144,7 +144,12 @@
       if (out.result !== 'ok') return gone();
       adopt(out.delivery);
       render();
-    } catch { /* the card stays as the newer peek showed it */ }
+    } catch (err) {
+      // Still the newest: it may have pushed aside a load's answer, so the card must not be left half-drawn.
+      if (g !== gen || v !== seq) return;
+      if (delivery) render();
+      else show({ label: 'Can’t reach Remind Me', body: `<div class="next-people">${esc(err.message)}</div>`, note: 'Check your connection and reload this page.' });
+    }
   }
 
   // Got it: `from` is the alert this link came with (a tap from the first push also tells Remind Me it arrived).
