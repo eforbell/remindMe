@@ -10,11 +10,19 @@
 (() => {
   const { esc, api } = RM;
   const $ = (id) => document.getElementById(id);
-  const params = new URLSearchParams(location.hash.slice(1));
-  const token = params.get('t') || '';
-  const alertNo = /^\d{1,5}$/.test(params.get('a') || '') ? Number(params.get('a')) : null;
+  // The link in the address bar. A second notification can open in the tab already showing the first, changing
+  // only the fragment: load() rereads it, and `gen` makes anything still in flight for the old link ignore its answer.
+  let token = '';
+  let alertNo = null;
+  let gen = 0;
   let delivery = null;
   let busy = false;
+
+  function readLink() {
+    const params = new URLSearchParams(location.hash.slice(1));
+    token = params.get('t') || '';
+    alertNo = /^\d{1,5}$/.test(params.get('a') || '') ? Number(params.get('a')) : null;
+  }
 
   // Times in the household's zone (it comes with the reminder), never the phone's.
   function timeText(iso) {
@@ -25,7 +33,16 @@
   }
 
   // Through the pages' one fetch helper (common.js), like every other page write.
-  const post = (body) => api('api/ack', { method: 'POST', body: { token, via: 'link', ...body } });
+  const post = (tok, body) => api('api/ack', { method: 'POST', body: { token: tok, via: 'link', ...body } });
+
+  // An action's answer has no zone of its own: keep the one peek gave, so times stay in the household's.
+  function adopt(next) {
+    delivery = { ...next, timezone: next.timezone || delivery?.timezone || null };
+  }
+
+  function setButtons(disabled) {
+    document.querySelectorAll('#ack-actions button').forEach((b) => { b.disabled = disabled; });
+  }
 
   function show({ label, body, note = '', actions = false }) {
     $('ack-label').textContent = label;
@@ -74,17 +91,35 @@
   async function act(body, done) {
     if (busy) return;
     busy = true;
-    document.querySelectorAll('#ack-actions button').forEach((b) => { b.disabled = true; });
+    const g = gen;
+    const tok = token;
+    setButtons(true);
     try {
-      const out = await post(body);
+      const out = await post(tok, body);
+      if (g !== gen) return;
       if (out.result === 'gone') return gone();
-      if (out.delivery) delivery = out.delivery;
+      if (out.delivery) adopt(out.delivery);
       render(done(out));
     } catch (err) {
-      render(`${err.message} Nothing was changed: try again.`);
+      if (g !== gen) return;
+      // Refused (a 4xx): nothing changed. No answer or a server error: it may have gone through, so look again.
+      if (err.status && err.status < 500) return render(`${err.message} Nothing was changed: try again.`);
+      await recheck(g, tok);
     } finally {
-      busy = false;
-      document.querySelectorAll('#ack-actions button').forEach((b) => { b.disabled = false; });
+      if (g === gen) { busy = false; setButtons(false); }
+    }
+  }
+
+  async function recheck(g, tok) {
+    try {
+      const out = await post(tok, { action: 'peek' });
+      if (g !== gen) return;
+      if (out.result !== 'ok') return gone();
+      adopt(out.delivery);
+      render('Couldn’t confirm that tap. Here’s where it is now.');
+    } catch {
+      if (g !== gen) return;
+      render('Couldn’t confirm that tap went through. Reload this page to check before trying again.');
     }
   }
 
@@ -103,17 +138,30 @@
     });
   });
 
-  async function start() {
+  async function load() {
+    gen += 1;
+    const g = gen;
+    busy = false;
+    setButtons(false);
+    readLink();
+    delivery = null;
+    $('ack-actions').classList.add('hidden');
+    $('ack-note').textContent = '';
+    $('ack-label').textContent = 'Reminder';
+    $('ack-body').innerHTML = '<span class="skeleton line" style="width:60%"></span>';
     if (!token) return gone();
     try {
-      const out = await post({ action: 'peek' });
+      const out = await post(token, { action: 'peek' });
+      if (g !== gen) return;
       if (out.result !== 'ok') return gone();
       delivery = out.delivery;
       render();
     } catch (err) {
+      if (g !== gen) return;
       show({ label: 'Can’t reach Remind Me', body: `<div class="next-people">${esc(err.message)}</div>`, note: 'Check your connection and reload this page.' });
     }
   }
 
-  start();
+  window.addEventListener('hashchange', load);
+  load();
 })();

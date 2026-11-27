@@ -1054,6 +1054,28 @@ test('follow-up creation never deadlocks against delete or archive', { skip: db.
 
 // ── The Got it link (PR 3) ──────────────────────────────────────────────────
 
+test('Got it committed while the link is being built still stops the follow-up alert', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam]);
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/' };
+  await pass(T0, fakeSender(), { config });
+  // Got it lands the moment the signing key is read after the claim: that read must come before the send check.
+  let armed = false;
+  let acked = false;
+  const query = async (...args) => {
+    if (armed && !acked && /app_config/.test(String(args[0]?.text || args[0]))) {
+      acked = true;
+      await acks.ack(pool, { deliveryId: (await deliveryOf(sam)).id, who: sam.id, via: 'app', now: at('2026-11-03T14:15:21Z') });
+    }
+    return pool.query(...args);
+  };
+  const watched = new Proxy(pool, { get: (t, k) => (k === 'query' ? query : (typeof t[k] === 'function' ? t[k].bind(t) : t[k])) });
+  const sender = fakeSender();
+  await dispatcher.runPass(watched, { source: 'test', now: () => at('2026-11-03T14:15:20Z'), sendImpl: sender.sendImpl, config, afterClaim: async () => { armed = true; } });
+  assert.ok(acked, 'the key was read after the claim');
+  assert.equal(sender.calls.length, 0, 'the follow-up alert was not pushed');
+});
+
 test('Until-acknowledged pushes link to the Got it page with the delivery’s token; others don’t', { skip: db.skip }, async () => {
   const [sam, riley] = await household();
   await nagReminder([riley]);
