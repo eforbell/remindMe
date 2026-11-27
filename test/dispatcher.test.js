@@ -1051,3 +1051,82 @@ test('follow-up creation never deadlocks against delete or archive', { skip: db.
   ]);
   for (const r of results) assert.equal(r.status, 'fulfilled', r.reason?.message);
 });
+
+// ── The Got it link (PR 3) ──────────────────────────────────────────────────
+
+test('Got it committed while the link is being built still stops the follow-up alert', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam]);
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/' };
+  await pass(T0, fakeSender(), { config });
+  // Got it lands the moment the signing key is read after the claim: that read must come before the send check.
+  let armed = false;
+  let acked = false;
+  const query = async (...args) => {
+    if (armed && !acked && /app_config/.test(String(args[0]?.text || args[0]))) {
+      acked = true;
+      await acks.ack(pool, { deliveryId: (await deliveryOf(sam)).id, who: sam.id, via: 'app', now: at('2026-11-03T14:15:21Z') });
+    }
+    return pool.query(...args);
+  };
+  const watched = new Proxy(pool, { get: (t, k) => (k === 'query' ? query : (typeof t[k] === 'function' ? t[k].bind(t) : t[k])) });
+  const sender = fakeSender();
+  await dispatcher.runPass(watched, { source: 'test', now: () => at('2026-11-03T14:15:20Z'), sendImpl: sender.sendImpl, config, afterClaim: async () => { armed = true; } });
+  assert.ok(acked, 'the key was read after the claim');
+  assert.equal(sender.calls.length, 0, 'the follow-up alert was not pushed');
+});
+
+test('Until-acknowledged pushes link to the Got it page with the delivery’s token; others don’t', { skip: db.skip }, async () => {
+  const [sam, riley] = await household();
+  await nagReminder([riley]);
+  await reminders.create(pool, { text: 'Bins out', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/', appPublicUrl: 'https://home.example/remind/' };
+  const sender = fakeSender();
+  await pass(T0, sender, { config });
+  await pass(at('2026-11-03T14:15:20Z'), sender, { config });
+  const d = await deliveryOf(riley);
+  const key = await acks.ackKey(pool);
+  const links = callsTo(sender, 'Riley').map((c) => c.payload.open_url);
+  assert.equal(links.length, 2);
+  links.forEach((link, i) => {
+    const m = /^https:\/\/home\.example\/remind\/ack#t=([A-Za-z0-9_.-]+)&a=(\d+)$/.exec(link);
+    assert.ok(m, link);
+    assert.equal(acks.verifyToken(key, m[1]), d.send_key, 'the delivery’s token, on every alert');
+    assert.equal(Number(m[2]), i, 'and the alert’s own number');
+  });
+  assert.equal(callsTo(sender, 'Sam')[0].payload.open_url, 'https://home.example/remind/', 'a normal reminder keeps TAP_OPENS_APP’s link');
+  const { rows } = await pool.query('SELECT payload FROM deliveries');
+  assert.ok(rows.every((r) => !JSON.stringify(r.payload).includes('ack#')), 'the token is never stored in a payload');
+
+  // Without APP_PUBLIC_URL: no token, no link.
+  const [jo] = await household(['Jo']);
+  await nagReminder([jo]);
+  const plain = fakeSender();
+  await pass(T0, plain, { config: { ...CONFIG, ackBaseUrl: null } });
+  assert.equal(plain.calls[0].payload.open_url, undefined);
+});
+
+test('the link is decided at send time: a retry after Got it carries none, and the mirror’s copy never has one', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await members.setMirrorKey(pool, sam.id, { key: 'mirror_sam_key_0001' });
+  await nagReminder([sam], { repeat: { freq: 'daily', count: null } });
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/', mirrorUrl: 'https://mirror.example' };
+  const mirrored = [];
+  const mirrorImpl = async (_base, _secret, payload) => { mirrored.push(payload); return { status: 200, id: null }; };
+  await pass(T0, fakeSender({ fail: () => true }), { config, mirrorImpl });
+  assert.equal(mirrored.length, 1);
+  assert.equal(mirrored[0].open_url, undefined, 'no token to the mirror');
+  // Superseded by a newer occurrence recorded missed: the old first push may still retry, without a link.
+  await pool.query("UPDATE deliveries SET follow_up_ended = 'superseded'");
+  const sender = fakeSender();
+  await pass(at('2026-11-03T14:01:20Z'), sender, { config, mirrorImpl });
+  assert.equal(sender.calls.length, 1);
+  assert.equal(sender.calls[0].payload.open_url, undefined);
+});
+
+test('the Got it page address comes from APP_PUBLIC_URL, plain http(s) only', () => {
+  assert.equal(dispatcher.ackBaseUrl('https://home.example/remind'), 'https://home.example/remind/');
+  assert.equal(dispatcher.ackBaseUrl('http://192.168.1.5:3013/'), 'http://192.168.1.5:3013/');
+  for (const bad of ['', null, 'ftp://x/', 'https://x/?a=1', 'https://x/#y', 'https://u:p@x/', 'not a url']) assert.equal(dispatcher.ackBaseUrl(bad), null, String(bad));
+  assert.equal(dispatcher.defaultConfig({ APP_PUBLIC_URL: 'https://home.example/remind/' }).ackBaseUrl, 'https://home.example/remind/', 'whatever TAP_OPENS_APP says');
+});

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#141310">
+  <meta name="referrer" content="no-referrer">
+  <title>Got it? · Remind Me</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="sovereign-fonts.css">
+  <link rel="stylesheet" href="sovereign-chassis.css">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="remind-skin.css">
+  <script src="theme.js"></script>
+</head>
+<!-- The page a "Until acknowledged" push links to. Loading it never acknowledges anything (a link preview or a
+     prefetch must not press Got it for you): it only shows the reminder, and only a tap on a button acts. -->
+<body class="page-ack">
+  <div id="app">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="Remind Me home"><img src="favicon.svg" alt="" width="32" height="32"><span>Remind Me</span></a>
+      <div class="topbar-actions"><button type="button" class="icon-btn" data-theme-toggle aria-label="Theme"></button></div>
+    </header>
+
+    <main class="ack-main">
+      <section class="next-up ack-card" id="ack-card" aria-live="polite">
+        <div class="next-label" id="ack-label">Reminder</div>
+        <div class="next-body" id="ack-body"><span class="skeleton line" style="width:60%"></span></div>
+      </section>
+
+      <div class="home-actions ack-actions hidden" id="ack-actions">
+        <button type="button" class="big-btn big-btn-primary" id="ack-btn">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+          <span>Got it</span>
+        </button>
+        <div class="ack-snooze hidden" id="ack-snooze" role="group" aria-labelledby="snooze-label">
+          <div class="field-label" id="snooze-label">Snooze</div>
+          <div class="ack-snooze-row">
+            <button type="button" class="chip-btn" data-minutes="10">10 min</button>
+            <button type="button" class="chip-btn" data-minutes="30">30 min</button>
+            <button type="button" class="chip-btn" data-minutes="60">1 hour</button>
+          </div>
+        </div>
+      </div>
+
+      <p class="status-line ack-note" id="ack-note"></p>
+    </main>
+  </div>
+  <script src="shared/schedule-core.js"></script>
+  <script src="common.js"></script>
+  <script src="ack.js"></script>
+</body>
+</html>

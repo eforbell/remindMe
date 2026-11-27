@@ -264,6 +264,15 @@ test('POST /api/ack works with no origin and no identity; every other spelling a
     // Still JSON only.
     const form = await rawSend(base, 'POST', '/api/ack', { 'content-type': 'text/plain' }, undefined);
     assert.equal(form.status, 415);
+    // The Got it page is open too (exact path), and renders no data.
+    const pageRes = await rawSend(base, 'GET', '/ack');
+    assert.equal(pageRes.status, 200);
+    assert.match(pageRes.text, /<script src="ack.js">/);
+    assert.ok(!/Take medicine/.test(pageRes.text));
+    assert.equal((await rawSend(base, 'GET', '/ack.js')).status, 200, 'its script is a page asset');
+    for (const path of ['/ack.html', '/ACK', '/ack/', '/ack/x']) {
+      assert.equal((await rawSend(base, 'GET', path)).status, 403, path);
+    }
     for (const [method, path] of [
       ['GET', '/api/ack'], ['HEAD', '/api/ack'], ['PUT', '/api/ack'], ['DELETE', '/api/ack'],
       ['POST', '/API/ack'], ['POST', '/api/ack/'], ['POST', '/Api/Ack'], ['POST', '/api//ack'], ['POST', '/api/ack/x'],
