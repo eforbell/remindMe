@@ -520,3 +520,18 @@ test('Mark done on a delivery that was stopped answers gone, not not-found', { s
   assert.equal(res.status, 200, JSON.stringify(res.data));
   assert.deepEqual(res.data, { result: 'gone' });
 });
+
+test('the list and recent deliveries say when the next alert is a snooze', { skip: db.skip }, async () => {
+  await household();
+  const id = await create({ recipients: [riley.id], repeat: { freq: 'daily', count: null } });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const kinds = async () => ({
+    list: (await call(sam, 'GET', 'api/reminders')).data.reminders.find((r) => r.id === id).deliveries.map((x) => x.next_alert_kind),
+    recent: (await call(sam, 'GET', 'api/deliveries')).data.deliveries.map((x) => x.next_alert_kind),
+  });
+  clock = at('2026-11-04T14:05:00Z');
+  assert.deepEqual(await kinds(), { list: ['nag'], recent: ['nag'] });
+  assert.equal((await call(riley, 'POST', `api/deliveries/${d.id}/snooze`, { minutes: 30, from: 0 })).data.result, 'snoozed');
+  assert.deepEqual(await kinds(), { list: ['snooze'], recent: ['snooze'] });
+});
