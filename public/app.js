@@ -25,9 +25,11 @@
   // Only the newest load() is applied: switching who uses this phone mid-load must never bring back the previous
   // person's Waiting card (a tap on it would act as the new person). state.viewer is who the data was loaded as.
   let loadGen = 0;
+  let recentGen = 0; // likewise for Recently sent, fetched on its own when Scheduled opens
   const viewerNow = () => (RM.tailnet() ? null : RM.getMe());
 
   // ── Data ─────────────────────────────────────────────────────────────────
+  // True once this call's data is on screen (false if it failed or a newer call replaced it).
   async function load() {
     const gen = ++loadGen;
     const asViewer = viewerNow();
@@ -38,7 +40,9 @@
       ]);
       if (gen !== loadGen) return;
       state.who = who;
-      state.viewer = asViewer;
+      // Who the server took this as: in tailnet mode the header is ignored (only learnt with `who`, so a stale
+      // local pick from before switching modes must not count).
+      state.viewer = RM.tailnet() ? null : asViewer;
       // A kid's household account: the People page is a parent's, so its links and controls are hidden.
       document.body.classList.toggle('suite-kid', RM.isKid());
       state.config = config;
@@ -58,10 +62,12 @@
       renderHome();
       if (!$('scheduled').classList.contains('hidden')) renderScheduled();
       maybeAskWho();
+      return true;
     } catch (err) {
-      if (gen !== loadGen) return;
+      if (gen !== loadGen) return false;
       $('next-body').innerHTML = `<span class="muted">${esc(err.message)}</span>`;
       $('status-line').textContent = '';
+      return false;
     }
   }
 
@@ -161,9 +167,10 @@
       } else {
         // From the latest alert, as the waiting list showed it: a stale answer means it changed meanwhile.
         const out = await api(`api/deliveries/${id}/snooze`, { method: 'POST', body: { minutes: Number(b.dataset.minutes), from: w.alert_no } });
-        toast(out.result === 'snoozed' ? `Snoozed until ${timeOf(out.until)}` : 'It changed meanwhile. Here’s the latest.', out.result === 'snoozed' ? 'ok' : 'bad');
+        toast(out.result === 'snoozed' ? `Snoozed until ${timeOf(out.until)}`
+          : out.result === 'gone' ? 'That one was stopped meanwhile.' : 'It changed meanwhile. Here’s the latest.', out.result === 'snoozed' ? 'ok' : 'bad');
       }
-      snoozeOpen = null;
+      if (snoozeOpen === id) snoozeOpen = null; // another delivery's chooser stays open
     });
   });
 
@@ -245,12 +252,16 @@
   $('whoami-list').addEventListener('click', (e) => {
     const b = e.target.closest('[data-id]');
     if (!b) return;
-    RM.setMe(Number(b.dataset.id));
+    const picked = Number(b.dataset.id);
+    const changed = picked !== RM.getMe();
+    RM.setMe(picked);
     closeSheet($('whoami'));
     // What you see depends on who you are: the previous person's Waiting card goes now, then fetch yours.
-    state.waiting = [];
-    snoozeOpen = null;
-    if (state.loaded) renderWaiting();
+    if (changed) {
+      state.waiting = [];
+      snoozeOpen = null;
+      if (state.loaded) renderWaiting();
+    }
     load();
   });
   $('me-btn').addEventListener('click', () => { if (!RM.tailnet()) openWho(); });
@@ -270,7 +281,11 @@
     } finally {
       acting.delete(id);
     }
-    await load();
+    // The reload redraws the buttons. If it fails, redraw from what's on hand so they aren't left disabled.
+    if (!(await load())) {
+      renderWaiting();
+      if (!$('scheduled').classList.contains('hidden')) renderScheduled();
+    }
   }
 
   async function act(action, id) {
@@ -397,8 +412,11 @@
       : `<div class="empty-state"><h3>Nothing scheduled</h3><p>New reminders show up here until they’re sent.</p>
          <div class="form-actions"><button type="button" class="btn-solid" id="empty-new">New reminder</button></div></div>`;
     $('empty-new')?.addEventListener('click', () => { closeSheet($('scheduled')); openComposer(); });
+    const gen = ++recentGen;
+    const asViewer = viewerNow();
     try {
       const { deliveries } = await api('api/deliveries?limit=15');
+      if (gen !== recentGen || viewerNow() !== asViewer) return; // a newer request, or another person, owns the list
       const tz = state.config.timezone;
       $('recent').classList.toggle('hidden', !deliveries.length);
       $('recent-list').innerHTML = deliveries.map((d) => {
@@ -411,7 +429,7 @@
           <span class="recent-main"><span class="recent-text">${esc(d.text)}</span>
           <span class="recent-meta">${esc(d.member_name)} · ${esc(RM.whenText(w.date, w.time, today))}${status}${ack}</span></span></li>`;
       }).join('');
-    } catch { $('recent').classList.add('hidden'); }
+    } catch { if (gen === recentGen) $('recent').classList.add('hidden'); }
   }
 
   // A recent delivery's acknowledgement, with "Mark done" for whoever set it while it's still waiting (this is
