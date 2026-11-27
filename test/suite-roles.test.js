@@ -84,6 +84,7 @@ const KID_ALLOWED = [
   ['GET', '/api/deliveries'], ['GET', '/api/deliveries?limit=5'], ['GET', '/api/suggestions?q=med'], ['HEAD', '/api/reminders'],
   ['POST', '/api/reminders', { text: 'x', recipients: [1] }], ['PUT', '/api/reminders/3', { text: 'x' }], ['DELETE', '/api/reminders/3'],
   ['POST', '/api/reminders/3/extend'], ['POST', '/api/reminders/3/dismiss-renewal'],
+  ['POST', '/api/deliveries/3/ack'], ['POST', '/api/deliveries/3/snooze', { minutes: 10, from: 0 }],
 ];
 // The People page and everything else is a parent's.
 const PARENT_ONLY = [
@@ -103,6 +104,8 @@ const KID_SPELLINGS = [
   ['PATCH', '/api/reminders/3'], ['DELETE', '/api/reminders'], ['PUT', '/api/reminders'], ['POST', '/api/members'],
   ['POST', '/api/me'], ['DELETE', '/api/me'], ['PUT', '/api/config'], ['POST', '/api/reminders/3'], ['DELETE', '/api/reminders/3/extend'],
   ['GET', '/api/reminders/3'], ['GET', '/api/reminders/3/extend'],
+  ['POST', '/api/deliveries/3/ack/'], ['POST', '/api/deliveries/03/ack'], ['POST', '/API/deliveries/3/ack'],
+  ['GET', '/api/deliveries/3/ack'], ['PUT', '/api/deliveries/3/snooze'], ['POST', '/api/deliveries/3/Snooze'],
 ];
 
 test('a kid may use the main page, its reads and reminders for anyone; the People page is a parent\'s', async () => {
@@ -229,4 +232,47 @@ test('a kid\'s list of people says who can be reached, never key previews, deliv
   await withServer({}, null, new PeopleDb(), async (call) => {
     assert.equal((await call('GET', '/api/members')).json().members[0].mirror_key_preview, '••••WXYZ');
   });
+});
+
+// Got it by token (docs/plan-ack-and-snooze.md): Home Push posts it from a notification button, with no browser
+// origin and no household identity. Exactly POST /api/ack gets past both gates; nothing else does.
+function rawSend(base, method, path, headers = {}, body) {
+  const text = body === undefined ? undefined : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(`${base}${path}`, { method, headers: { ...headers, ...(text ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) } : {}) } }, (res) => {
+      let out = '';
+      res.on('data', (chunk) => { out += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, text: out, json: () => JSON.parse(out) }));
+    });
+    req.on('error', reject);
+    req.end(text);
+  });
+}
+
+test('POST /api/ack works with no origin and no identity; every other spelling and method is still gated', async () => {
+  const app = createApp({ pool: new StandInDb(), timezone: 'America/New_York', env: TAILNET, suiteReader: directoryOf(MEMBERS()) });
+  const server = app.listen(0, '127.0.0.1');
+  const error = console.error;
+  console.error = () => {};
+  try {
+    await new Promise((resolve) => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const token = { token: 'AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA', action: 'ack', from: 0 };
+    const ok = await rawSend(base, 'POST', '/api/ack', {}, token);
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.json().result, 'gone', 'reached the handler, which found no such delivery');
+    // Still JSON only.
+    const form = await rawSend(base, 'POST', '/api/ack', { 'content-type': 'text/plain' }, undefined);
+    assert.equal(form.status, 415);
+    for (const [method, path] of [
+      ['GET', '/api/ack'], ['HEAD', '/api/ack'], ['PUT', '/api/ack'], ['DELETE', '/api/ack'],
+      ['POST', '/API/ack'], ['POST', '/api/ack/'], ['POST', '/Api/Ack'], ['POST', '/api//ack'], ['POST', '/api/ack/x'],
+    ]) {
+      const res = await rawSend(base, method, path, {}, ['GET', 'HEAD', 'DELETE'].includes(method) ? undefined : token);
+      assert.equal(res.status, 403, `${method} ${path}: ${res.status} ${res.text}`);
+    }
+  } finally {
+    console.error = error;
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
