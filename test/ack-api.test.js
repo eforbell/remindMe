@@ -359,3 +359,73 @@ test('a snoozed one-off whose recipient is then removed stays in its creator’s
   const recent = (await call(sam, 'GET', 'api/deliveries')).data.deliveries;
   assert.equal(recent.length, 1);
 });
+
+test('archiving never deadlocks with delete or with recording the next occurrence (each delivery row written once)', { skip: db.skip }, async () => {
+  const fail = async (secret) => { if (secret.includes('riley')) throw new Error('brrr answered 503'); return { status: 200 }; };
+  for (let i = 0; i < 10; i += 1) {
+    // A finished one-off whose first push to Riley is still retrying: archive Riley while it's deleted.
+    await household();
+    const id = await create({ ack_required: false });
+    await passAt(FIRE, fail);
+    let results = await Promise.allSettled([members.archive(pool, riley.id, { force: true }), remindersLib.remove(pool, id)]);
+    for (const x of results) assert.equal(x.status, 'fulfilled', x.reason?.message);
+
+    // A series Riley was taken off (by code from before this change) with their push still retrying: archive
+    // Riley while the next occurrence is recorded.
+    await household();
+    const series = await create({ ack_required: false, repeat: { freq: 'daily', count: null } });
+    await passAt(FIRE, fail);
+    await pool.query('DELETE FROM reminder_recipients WHERE reminder_id = $1 AND member_id = $2', [series, riley.id]);
+    clock = at('2026-11-05T14:00:10Z');
+    results = await Promise.allSettled([
+      members.archive(pool, riley.id, { force: true }),
+      dispatcher.runPass(pool, { source: 'test', now: () => clock, sendImpl: async () => ({ status: 200 }), config: CONFIG }),
+    ]);
+    for (const x of results) assert.equal(x.status, 'fulfilled', x.reason?.message);
+    assert.equal((await deliveryOf(riley)).status, 'cancelled');
+  }
+});
+
+test('an archived recipient’s link stops working', { skip: db.skip }, async () => {
+  await household();
+  await create({ recipients: [riley.id] });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const token = acks.makeToken(await acks.ackKey(pool), d.send_key);
+  await acks.ack(pool, { deliveryId: d.id, who: riley.id, via: 'app', now: at('2026-11-04T14:01:00Z') });
+  await members.archive(pool, riley.id, { force: true });
+  clock = at('2026-11-04T14:05:00Z');
+  assert.deepEqual((await call(null, 'POST', 'api/ack', { token, action: 'peek' })).data, { result: 'gone' });
+});
+
+test('an action already past its first check sees an edit that takes the person off before it answers', { skip: db.skip }, async () => {
+  await household();
+  const id = await create({ repeat: { freq: 'daily', count: null } });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const token = acks.makeToken(await acks.ackKey(pool), d.send_key);
+  // An edit holds the reminder while it takes Riley off; the tap arrives in the middle of it.
+  const edit = await pool.connect();
+  try {
+    await edit.query('BEGIN');
+    await edit.query('SELECT id FROM reminders WHERE id = $1 FOR UPDATE', [id]);
+    await edit.query('DELETE FROM reminder_recipients WHERE reminder_id = $1 AND member_id = $2', [id, riley.id]);
+    const tap = acks.byToken(pool, { token, action: 'ack', from: 0, now: at('2026-11-04T14:03:00Z') });
+    await new Promise((r) => setTimeout(r, 150));
+    await edit.query('COMMIT');
+    assert.deepEqual(await tap, { result: 'gone' });
+  } finally {
+    edit.release();
+  }
+  assert.equal((await deliveryOf(riley)).acked_at, null, 'nothing recorded');
+});
+
+test('a one-off never sent because its recipient was archived stays in its creator’s recent deliveries', { skip: db.skip }, async () => {
+  await household();
+  await create({ ack_required: false, recipients: [riley.id] });
+  await passAt(FIRE, async () => { throw new Error('brrr answered 503'); });
+  await members.archive(pool, riley.id, { force: true });
+  clock = at('2026-11-04T14:10:00Z');
+  const recent = (await call(sam, 'GET', 'api/deliveries')).data.deliveries;
+  assert.deepEqual(recent.map((d) => [d.status, d.follow_up_ended]), [['cancelled', 'cancelled']]);
+});
