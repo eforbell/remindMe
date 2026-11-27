@@ -550,8 +550,8 @@ test('Until acknowledged re-alerts each person until the deadline, inside one de
   await pass(T0, sender);
   const d0 = await deliveryOf(riley);
   assert.equal(d0.follow_up_at.toISOString(), minutes(T0, 15).toISOString(), 'the first nag is armed from the send');
-  assert.equal(d0.follow_up_until.toISOString(), minutes(T0, 60).toISOString());
-  assert.equal(d0.follow_up_horizon.toISOString(), minutes(T0, 120).toISOString());
+  assert.equal(d0.follow_up_until.toISOString(), minutes(T0, 62).toISOString(), '60 minutes, plus 2 so a late pass still makes the last nag');
+  assert.equal(d0.follow_up_horizon.toISOString(), minutes(T0, 122).toISOString());
 
   await pass(minutes(T0, 10), sender);
   assert.equal(sender.calls.length, 2, 'nothing before the interval');
@@ -570,20 +570,22 @@ test('Until acknowledged re-alerts each person until the deadline, inside one de
   assert.equal(a1.give_up_at.toISOString(), minutes(n1, 15).toISOString());
 
   await pass(at('2026-11-03T14:30:30Z'), sender);
-  await pass(at('2026-11-03T14:45:40Z'), sender); // the next would be 15:00:40, past 15:00:10: this is the last
+  await pass(at('2026-11-03T14:45:40Z'), sender);
+  assert.equal((await deliveryOf(riley)).follow_up_at.toISOString(), '2026-11-03T15:00:10.000Z', 'nags stay on schedule however late each pass runs');
+  await pass(at('2026-11-03T15:00:50Z'), sender); // due at exactly 60 minutes: the last
   assert.equal((await deliveryOf(riley)).follow_up_ended, 'expired');
-  assert.equal(callsTo(sender, 'Riley').length, 4, 'the last nag is sent even though creating it expired the delivery');
-  assert.equal(callsTo(sender, 'Riley')[3].payload.message, 'Still waiting · was due 9:00 AM · alert 3');
-  await pass(at('2026-11-03T15:10:00Z'), sender);
+  assert.equal(callsTo(sender, 'Riley').length, 5, 'the last nag is sent even though creating it expired the delivery');
+  assert.equal(callsTo(sender, 'Riley')[4].payload.message, 'Still waiting · was due 9:00 AM · alert 4');
+  await pass(at('2026-11-03T15:15:20Z'), sender);
   await pass(at('2026-11-03T16:30:00Z'), sender);
-  assert.equal(sender.calls.length, 8, 'nothing after the deadline');
+  assert.equal(sender.calls.length, 10, 'nothing after the deadline');
 
   const keys = sender.calls.map((c) => c.idempotencyKey);
-  assert.equal(new Set(keys).size, 8, 'every alert has its own Idempotency-Key');
+  assert.equal(new Set(keys).size, 10, 'every alert has its own Idempotency-Key');
   const row = await reminderRow(id);
   assert.equal(row.occurrence_seq, 1, 'still one occurrence');
   assert.equal(row.status, 'completed');
-  assert.deepEqual((await alertsOf(riley)).map((a) => [a.alert_no, a.alert_kind, a.status]), [[1, 'nag', 'sent'], [2, 'nag', 'sent'], [3, 'nag', 'sent']]);
+  assert.deepEqual((await alertsOf(riley)).map((a) => [a.alert_no, a.alert_kind, a.status]), [[1, 'nag', 'sent'], [2, 'nag', 'sent'], [3, 'nag', 'sent'], [4, 'nag', 'sent']]);
 });
 
 test('Got it is per person: Sam acknowledging leaves Riley re-alerting; the creator can clear it for Riley', { skip: db.skip }, async () => {
@@ -692,9 +694,9 @@ test('after downtime an overdue nag before its deadline sends one alert; one pas
   await nagReminder([sam]);
   const sender = fakeSender();
   await pass(T0, sender);
-  await pass(at('2026-11-03T14:52:00Z'), sender); // three nags overdue: one alert, and the next would be past 15:00:10
+  await pass(at('2026-11-03T14:52:00Z'), sender); // three nags overdue: one alert, not a burst
   assert.equal(sender.calls.length, 2);
-  assert.equal((await deliveryOf(sam)).follow_up_ended, 'expired');
+  assert.equal((await deliveryOf(sam)).follow_up_at.toISOString(), '2026-11-03T15:00:10.000Z', 'then the last, at the end of the hour');
 
   const [riley] = await household(['Riley']);
   await nagReminder([riley]);
@@ -732,16 +734,60 @@ test('a claim on the last nag left by a crashed dispatcher is reclaimed and sent
   const [sam] = await household(['Sam']);
   await nagReminder([sam], { forMin: 60 });
   await pass(T0, fakeSender());
-  for (const t of ['14:15:20', '14:30:30']) await pass(at(`2026-11-03T${t}Z`), fakeSender());
-  const last = at('2026-11-03T14:45:40Z');
+  for (const t of ['14:15:20', '14:30:30', '14:45:40']) await pass(at(`2026-11-03T${t}Z`), fakeSender());
+  const last = at('2026-11-03T15:00:20Z');
   await pass(last, fakeSender(), { budgetMs: 0 }); // creates the last nag, then "crashes" mid-send
-  await pool.query("UPDATE deliveries SET status = 'sending', claimed_at = $1, claim_token = gen_random_uuid(), attempts = 1 WHERE alert_no = 3", [last]);
+  assert.equal((await deliveryOf(sam)).follow_up_ended, 'expired', 'it is the last');
+  await pool.query("UPDATE deliveries SET status = 'sending', claimed_at = $1, claim_token = gen_random_uuid(), attempts = 1 WHERE alert_no = 4", [last]);
   const sender = fakeSender();
   await pass(minutes(last, 6), sender);
   assert.equal(sender.calls.length, 1);
-  const a3 = (await alertsOf(sam))[2];
-  assert.equal(a3.status, 'sent');
-  assert.equal(sender.calls[0].idempotencyKey, `remind-me-${a3.send_key}`);
+  const a4 = (await alertsOf(sam))[3];
+  assert.equal(a4.status, 'sent');
+  assert.equal(sender.calls[0].idempotencyKey, `remind-me-${a4.send_key}`);
+});
+
+test('every 30 minutes for 1 hour sends the 60-minute nag, and a snooze in between still works', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam], { every: 30, forMin: 60 });
+  const sender = fakeSender();
+  await pass(T0, sender);
+  await pass(at('2026-11-03T14:30:50Z'), sender);
+  assert.equal((await deliveryOf(sam)).follow_up_ended, null, 'not expired after the 30-minute nag');
+  const out = await acks.snooze(pool, { deliveryId: (await deliveryOf(sam)).id, minutes: 10, from: 1, now: at('2026-11-03T14:31:00Z') });
+  assert.equal(out.result, 'snoozed');
+  await pass(at('2026-11-03T14:41:10Z'), sender);
+  assert.equal((await deliveryOf(sam)).follow_up_at.toISOString(), '2026-11-03T15:00:10.000Z', 'one last nag at the end of the hour');
+  await pass(at('2026-11-03T15:00:50Z'), sender);
+  await pass(at('2026-11-03T15:31:00Z'), sender);
+  assert.deepEqual(sender.calls.slice(1).map((c) => c.payload.message), [
+    'Still waiting · was due 9:00 AM · alert 1', 'Snoozed · was due 9:00 AM', 'Still waiting · was due 9:00 AM · alert 3',
+  ]);
+});
+
+test('a pass that started before a deadline does not create an alert after it', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam]);
+  await pass(T0, fakeSender());
+  const d = await deliveryOf(sam);
+  await pool.query("UPDATE deliveries SET follow_up_at = '2026-11-03T15:00:10Z' WHERE id = $1", [d.id]);
+  // The pass starts a second before follow_up_until (15:02:10); by the time it reaches this delivery it is after.
+  let n = 0;
+  const clock = () => (n++ < 2 ? at('2026-11-03T15:02:09Z') : at('2026-11-03T15:02:11Z'));
+  const sender = fakeSender();
+  await dispatcher.runPass(pool, { source: 'test', now: clock, sendImpl: sender.sendImpl, config: CONFIG });
+  assert.equal(sender.calls.length, 0);
+  assert.equal((await deliveryOf(sam)).follow_up_ended, 'expired');
+});
+
+test('an older failure never overwrites a newer outcome on the channel', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await reminders.create(pool, { text: 'A', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  await pool.query("UPDATE member_notification_channels SET last_ok_at = now() + interval '1 hour', last_error = NULL WHERE member_id = $1", [sam.id]);
+  await pass(T0, fakeSender({ fail: () => true }));
+  const { rows: [c] } = await pool.query('SELECT last_error FROM member_notification_channels WHERE member_id = $1', [sam.id]);
+  assert.equal(c.last_error, null, 'a success recorded after this failure stands');
+  assert.equal((await deliveries())[0].status, 'pending');
 });
 
 test('a newer alert replaces an older one still retrying', { skip: db.skip }, async () => {
@@ -819,11 +865,11 @@ test('deadlines are hard: a follow-up still uncreated when its deadline passes i
   await nagReminder([sam]);
   await pass(T0, fakeSender());
   const d = await deliveryOf(sam);
-  // The latest a cursor is ever placed: two minutes before follow_up_until (15:00:10). The dispatcher is down
+  // The latest a cursor is ever placed: two minutes before follow_up_until (15:02:10). The dispatcher is down
   // until a minute after the deadline.
-  await pool.query("UPDATE deliveries SET follow_up_at = '2026-11-03T14:58:10Z' WHERE id = $1", [d.id]);
+  await pool.query("UPDATE deliveries SET follow_up_at = '2026-11-03T15:00:10Z' WHERE id = $1", [d.id]);
   const sender = fakeSender();
-  await pass(at('2026-11-03T15:01:10Z'), sender);
+  await pass(at('2026-11-03T15:03:10Z'), sender);
   assert.equal(sender.calls.length, 0);
   assert.equal((await deliveryOf(sam)).follow_up_ended, 'expired');
 });
@@ -837,7 +883,7 @@ test('the first push’s deadlines and first nag run from when it was marked sen
   const d = await deliveryOf(sam);
   assert.equal(d.sent_at.toISOString(), done.toISOString());
   assert.equal(d.follow_up_at.toISOString(), minutes(done, 5).toISOString());
-  assert.equal(d.follow_up_until.toISOString(), minutes(done, 60).toISOString());
+  assert.equal(d.follow_up_until.toISOString(), minutes(done, 62).toISOString());
 });
 
 test('a pass that runs before migration 0006 is applied claims nothing', { skip: db.skip }, async () => {
@@ -958,7 +1004,7 @@ test('a follow-up alert expires on its own window even when the first push went 
   assert.equal(sender.calls.length, 2);
   assert.equal(sender.calls[1].payload.expiration_date, minutes(late, 30).toISOString());
   assert.equal(sender.calls[1].payload.message, 'Still waiting · was due 9:00 AM · alert 1');
-  assert.equal((await deliveryOf(sam)).follow_up_until.toISOString(), minutes(late, 60).toISOString(), 'deadlines run from the send');
+  assert.equal((await deliveryOf(sam)).follow_up_until.toISOString(), minutes(late, 62).toISOString(), 'deadlines run from the send');
 });
 
 test('follow-up creation never deadlocks against delete or archive', { skip: db.skip }, async () => {

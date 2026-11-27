@@ -93,9 +93,9 @@ test('a forged, foreign or rotated-out token answers gone', { skip: db.skip }, a
 
 test('a token stops working past its horizon + 12 h, or once the delivery is superseded or cancelled', { skip: db.skip }, async () => {
   const { d, token } = await setup();
-  // Horizon: sent 14:00:10 + 60 min + 60 min = 16:00:10; the token works until 04:00:10 the next morning.
-  assert.equal((await acks.byToken(pool, { token, action: 'peek', now: at('2026-11-04T04:00:00Z') })).result, 'ok');
-  assert.equal((await acks.byToken(pool, { token, action: 'peek', now: at('2026-11-04T04:00:20Z') })).result, 'gone');
+  // Horizon: sent 14:00:10 + 60 min (+ 2 min slack) + 60 min = 16:02:10; the token works until 04:02:10 next morning.
+  assert.equal((await acks.byToken(pool, { token, action: 'peek', now: at('2026-11-04T04:02:00Z') })).result, 'ok');
+  assert.equal((await acks.byToken(pool, { token, action: 'peek', now: at('2026-11-04T04:02:20Z') })).result, 'gone');
   await acks.endFollowUps(pool, [d.id], 'cancelled');
   assert.equal((await acks.byToken(pool, { token, action: 'ack', now: at('2026-11-03T14:05:00Z') })).result, 'gone');
 });
@@ -107,7 +107,7 @@ test('a token that arrives before the first push is settled already works', { sk
   assert.equal(out.result, 'snoozed');
   const { rows: [after] } = await pool.query('SELECT * FROM deliveries WHERE id = $1', [d.id]);
   assert.equal(after.status, 'sent', 'a tap from the first push proves it arrived');
-  assert.equal(after.follow_up_until.toISOString(), '2026-11-03T15:00:40.000Z', 'the snooze set the deadlines itself');
+  assert.equal(after.follow_up_until.toISOString(), '2026-11-03T15:02:40.000Z', 'the snooze set the deadlines itself');
   const calls = [];
   const sendImpl = async (secret, payload) => { calls.push(payload); return { status: 200 }; };
   await dispatcher.runPass(pool, { source: 'test', now: () => at('2026-11-03T14:10:50Z'), sendImpl, config: CONFIG });
@@ -170,6 +170,17 @@ test('a newer failure on another push survives a token tap, even after the tappe
   assert.match(c.last_error, /503/, 'B’s failure is still shown');
   const { rows: [a] } = await pool.query('SELECT status FROM deliveries WHERE id = $1', [d.id]);
   assert.equal(a.status, 'sent');
+});
+
+test('a malformed alert number is refused, never read as the first push', { skip: db.skip }, async () => {
+  const { d, token } = await setup({ sender: failing });
+  for (const from of [false, true, [], {}, '0x0', ' 0', '-1', 1.5, '1e1']) {
+    await assert.rejects(acks.byToken(pool, { token, action: 'snooze', minutes: 10, from, now: at('2026-11-03T14:00:40Z') }), /which alert/, String(from));
+  }
+  const { rows: [after] } = await pool.query('SELECT status FROM deliveries WHERE id = $1', [d.id]);
+  assert.equal(after.status, 'pending', 'never promoted');
+  assert.equal(acks.parseAlertNo('3'), 3);
+  assert.equal(acks.parseAlertNo(0), 0);
 });
 
 test('snooze validates minutes and from', { skip: db.skip }, async () => {
