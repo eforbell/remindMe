@@ -21,15 +21,24 @@
 
   const state = { config: null, members: [], reminders: [], problems: [], waiting: [], health: null, who: null, loaded: false };
   let snoozeOpen = null; // the waiting delivery whose snooze choices are showing
+  const acting = new Set(); // deliveries with a Got it, snooze or Mark done in flight (no second request)
+  // Only the newest load() is applied: switching who uses this phone mid-load must never bring back the previous
+  // person's Waiting card (a tap on it would act as the new person). state.viewer is who the data was loaded as.
+  let loadGen = 0;
+  const viewerNow = () => (RM.tailnet() ? null : RM.getMe());
 
   // ── Data ─────────────────────────────────────────────────────────────────
   async function load() {
+    const gen = ++loadGen;
+    const asViewer = viewerNow();
     try {
       const [config, m, r, health, who] = await Promise.all([
         api('api/config'), api('api/members'), api('api/reminders'), api('api/health').catch(() => null),
         state.who || RM.loadWho(),
       ]);
+      if (gen !== loadGen) return;
       state.who = who;
+      state.viewer = asViewer;
       // A kid's household account: the People page is a parent's, so its links and controls are hidden.
       document.body.classList.toggle('suite-kid', RM.isKid());
       state.config = config;
@@ -50,6 +59,7 @@
       if (!$('scheduled').classList.contains('hidden')) renderScheduled();
       maybeAskWho();
     } catch (err) {
+      if (gen !== loadGen) return;
       $('next-body').innerHTML = `<span class="muted">${esc(err.message)}</span>`;
       $('status-line').textContent = '';
     }
@@ -118,17 +128,19 @@
   function renderWaiting() {
     const list = state.waiting;
     $('waiting').classList.toggle('hidden', !list.length);
-    $('waiting-list').innerHTML = list.map((w) => `
+    $('waiting-list').innerHTML = list.map((w) => {
+      const off = acting.has(w.id) ? ' disabled' : '';
+      return `
       <article class="wait-item ${w.ack_required ? 'is-ack' : ''}" data-delivery="${w.id}">
         <div class="wait-text">${esc(w.title)}</div>
         <div class="wait-meta">${waitingMeta(w)}</div>
         <div class="wait-actions">
-          ${w.can_ack && w.ack_required ? `<button type="button" class="btn-solid wait-btn" data-wact="ack" data-delivery="${w.id}">Got it</button>` : ''}
-          ${w.can_snooze ? `<button type="button" class="btn-ghost wait-btn" data-wact="snooze-open" data-delivery="${w.id}" aria-expanded="${snoozeOpen === w.id}">Snooze ▾</button>` : ''}
-          ${!w.ack_required ? `<button type="button" class="btn-ghost wait-btn" data-wact="ack" data-delivery="${w.id}">Dismiss</button>` : ''}
+          ${w.can_ack && w.ack_required ? `<button type="button" class="btn-solid wait-btn" data-wact="ack" data-delivery="${w.id}"${off}>Got it</button>` : ''}
+          ${w.can_snooze ? `<button type="button" class="btn-ghost wait-btn" data-wact="snooze-open" data-delivery="${w.id}" aria-expanded="${snoozeOpen === w.id}"${off}>Snooze ▾</button>` : ''}
         </div>
-        ${snoozeOpen === w.id && w.can_snooze ? `<div class="wait-snooze" role="group" aria-label="Snooze for">${SNOOZE.map((s) => `<button type="button" class="chip-btn" data-wact="snooze" data-delivery="${w.id}" data-minutes="${s.minutes}">${s.label}</button>`).join('')}</div>` : ''}
-      </article>`).join('');
+        ${snoozeOpen === w.id && w.can_snooze ? `<div class="wait-snooze" role="group" aria-label="Snooze for">${SNOOZE.map((s) => `<button type="button" class="chip-btn" data-wact="snooze" data-delivery="${w.id}" data-minutes="${s.minutes}"${off}>${s.label}</button>`).join('')}</div>` : ''}
+      </article>`;
+    }).join('');
   }
 
   $('waiting-list').addEventListener('click', async (e) => {
@@ -142,21 +154,17 @@
       renderWaiting();
       return;
     }
-    b.disabled = true;
-    try {
+    await deliveryAction(id, async () => {
       if (b.dataset.wact === 'ack') {
-        await api(`api/deliveries/${id}/ack`, { method: 'POST', body: {} });
-        toast(w.ack_required ? 'Got it' : 'Dismissed');
+        const out = await api(`api/deliveries/${id}/ack`, { method: 'POST', body: {} });
+        toast(out.result === 'gone' ? 'That one was stopped meanwhile.' : 'Got it', out.result === 'gone' ? 'bad' : 'ok');
       } else {
         // From the latest alert, as the waiting list showed it: a stale answer means it changed meanwhile.
         const out = await api(`api/deliveries/${id}/snooze`, { method: 'POST', body: { minutes: Number(b.dataset.minutes), from: w.alert_no } });
         toast(out.result === 'snoozed' ? `Snoozed until ${timeOf(out.until)}` : 'It changed meanwhile. Here’s the latest.', out.result === 'snoozed' ? 'ok' : 'bad');
       }
       snoozeOpen = null;
-    } catch (err) {
-      toast(err.message, 'bad');
-    }
-    await load();
+    });
   });
 
   function renderStatus() {
@@ -239,12 +247,32 @@
     if (!b) return;
     RM.setMe(Number(b.dataset.id));
     closeSheet($('whoami'));
-    // What you see depends on who you are: fetch your reminders.
+    // What you see depends on who you are: the previous person's Waiting card goes now, then fetch yours.
+    state.waiting = [];
+    snoozeOpen = null;
+    if (state.loaded) renderWaiting();
     load();
   });
   $('me-btn').addEventListener('click', () => { if (!RM.tailnet()) openWho(); });
 
   // Banner and list actions (event delegation).
+  // A Got it, snooze or Mark done: one at a time per delivery, only for whoever the screen was loaded as, and
+  // always followed by a reload (which redraws the buttons, re-enabled), whether it worked or not.
+  async function deliveryAction(id, run) {
+    if (acting.has(id)) return;
+    if (viewerNow() !== state.viewer) { await load(); return; }
+    acting.add(id);
+    renderWaiting();
+    try {
+      await run();
+    } catch (err) {
+      toast(err.message, 'bad');
+    } finally {
+      acting.delete(id);
+    }
+    await load();
+  }
+
   async function act(action, id) {
     const r = state.reminders.find((x) => x.id === id);
     if (!r) return;
@@ -318,24 +346,23 @@
     const expired = d.follow_up_ended === 'expired';
     if (!open && !expired) return '';
     const mark = r.created_by != null && r.created_by === RM.getMe() && d.member_id !== RM.getMe()
-      ? ` <button type="button" class="btn-ghost btn-xs" data-mark="${d.id}" data-name="${esc(name)}">Mark done for ${esc(name)}</button>` : '';
+      ? ` <button type="button" class="btn-ghost btn-xs" data-mark="${d.id}" data-name="${esc(name)}"${acting.has(d.id) ? ' disabled' : ''}>Mark done for ${esc(name)}</button>` : '';
     return expired
       ? `<span class="ds ds-warn">! ${esc(name)}: not acknowledged${mark}</span>`
-      : `<span class="ds ds-warn">… ${esc(name)}: waiting${d.follow_ups ? ` · ${plural(d.follow_ups, 're-alert')}` : ''}${mark}</span>`;
+      : `<span class="ds ds-warn">… ${esc(name)}: ${d.next_alert_kind === 'snooze' && d.next_alert_at ? `snoozed until ${esc(timeOf(d.next_alert_at))}`
+        : `waiting${d.follow_ups ? ` · ${plural(d.follow_ups, 're-alert')}` : ''}`}${mark}</span>`;
   }
 
   // "Mark done for Riley", from the list or recent deliveries: recorded as acknowledged by the viewer.
   document.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-mark]');
     if (!b || b.disabled) return;
+    const id = Number(b.dataset.mark);
     b.disabled = true;
-    try {
-      await api(`api/deliveries/${Number(b.dataset.mark)}/ack`, { method: 'POST', body: {} });
-      toast(`Marked done for ${b.dataset.name}`);
-    } catch (err) {
-      toast(err.message, 'bad');
-    }
-    await load();
+    await deliveryAction(id, async () => {
+      const out = await api(`api/deliveries/${id}/ack`, { method: 'POST', body: {} });
+      toast(out.result === 'gone' ? 'That one was stopped meanwhile.' : `Marked done for ${b.dataset.name}`, out.result === 'gone' ? 'bad' : 'ok');
+    });
   });
 
   function reminderCard(r, today) {
@@ -394,9 +421,12 @@
     const expired = d.follow_up_ended === 'expired';
     const open = !d.follow_up_ended && (d.status === 'sent' || d.follow_ups > 0 || d.next_alert_at);
     if (!expired && !open) return '';
-    const mark = d.created_by === RM.getMe() && d.member_id !== RM.getMe()
-      ? ` <button type="button" class="btn-ghost btn-xs" data-mark="${d.id}" data-name="${esc(d.member_name)}">Mark done</button>` : '';
-    return ` · <span class="ds-warn">${expired ? 'not acknowledged' : 'waiting'}</span>${mark}`;
+    const me = RM.getMe();
+    const mark = me != null && d.created_by === me && d.member_id !== me
+      ? ` <button type="button" class="btn-ghost btn-xs" data-mark="${d.id}" data-name="${esc(d.member_name)}"${acting.has(d.id) ? ' disabled' : ''}>Mark done</button>` : '';
+    const what = expired ? 'not acknowledged'
+      : d.next_alert_kind === 'snooze' && d.next_alert_at ? `snoozed until ${esc(timeOf(d.next_alert_at))}` : 'waiting';
+    return ` · <span class="ds-warn">${what}</span>${mark}`;
   }
 
   $('list-btn').addEventListener('click', () => {
@@ -1004,6 +1034,8 @@
       c.ack = s.repeat.ack ? { on: true, every: s.repeat.ack.every, for: s.repeat.ack.for } : { ...c.ack, on: false };
       if (c.ack.on && c.level === 'passive') c.level = state.config.default_level;
     }
+    // An older suggestion (no ack) that picks Quiet: Quiet never re-alerts, so the switch goes off with it.
+    if (c.level === 'passive' && c.ack.on) c.ack = { ...c.ack, on: false };
     if (s.repeat?.freq) {
       c.freq = s.repeat.freq;
       c.every = s.repeat.every || 1;
@@ -1102,8 +1134,8 @@
       visibility: c.visibility,
       repeat: currentRule(),
       created_by: RM.getMe(),
-      ack_required: c.ack.on,
-      ...(c.ack.on ? { realert_every_min: c.ack.every, realert_for_min: c.ack.for } : {}),
+      ack_required: c.ack.on && c.level !== 'passive',
+      ...(c.ack.on && c.level !== 'passive' ? { realert_every_min: c.ack.every, realert_for_min: c.ack.for } : {}),
     };
     if (c.mode !== 'edit' && anchorDate() !== c.date) body.anchor = anchorDate();
     const btn = $('schedule-btn');
