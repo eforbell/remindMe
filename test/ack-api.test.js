@@ -343,7 +343,7 @@ test('someone taken off a private reminder can no longer read it through their o
   const again = await call(riley, 'POST', `api/deliveries/${d.id}/ack`, {});
   assert.equal(again.status, 404);
   assert.equal(again.data.title, undefined);
-  assert.deepEqual((await call(null, 'POST', 'api/ack', { token, action: 'peek' })).data, { result: 'gone' });
+  assert.deepEqual((await call(null, 'POST', 'api/ack', { token, action: 'peek' })).data, { result: 'gone', ok: false, message: "Couldn't confirm this. Open Remind Me." });
   assert.ok((await deliveryOf(riley)).acked_at, 'the acknowledgement record is kept');
 });
 
@@ -408,7 +408,7 @@ test('an archived recipient’s link stops working', { skip: db.skip }, async ()
   await acks.ack(pool, { deliveryId: d.id, who: riley.id, via: 'app', now: at('2026-11-04T14:01:00Z') });
   await members.archive(pool, riley.id, { force: true });
   clock = at('2026-11-04T14:05:00Z');
-  assert.deepEqual((await call(null, 'POST', 'api/ack', { token, action: 'peek' })).data, { result: 'gone' });
+  assert.deepEqual((await call(null, 'POST', 'api/ack', { token, action: 'peek' })).data, { result: 'gone', ok: false, message: "Couldn't confirm this. Open Remind Me." });
 });
 
 test('an action already past its first check sees an edit that takes the person off before it answers', { skip: db.skip }, async () => {
@@ -548,4 +548,41 @@ test('the list and recent deliveries say when the next alert is a snooze', { ski
   assert.deepEqual(await kinds(), { list: ['nag'], recent: ['nag'] });
   assert.equal((await call(riley, 'POST', `api/deliveries/${d.id}/snooze`, { minutes: 30, from: 0 })).data.result, 'snoozed');
   assert.deepEqual(await kinds(), { list: ['snooze'], recent: ['snooze'] });
+});
+
+test('by token: the answers Home Push’s buttons read (ok and message), next to result', { skip: db.skip }, async () => {
+  await household();
+  await create({ recipients: [riley.id] });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const token = acks.makeToken(await acks.ackKey(pool), d.send_key);
+  clock = at('2026-11-04T14:03:00Z');
+  let r = await call(null, 'POST', 'api/ack', { token, action: 'snooze', minutes: 10, from: 3 });
+  assert.deepEqual([r.data.result, r.data.ok, r.data.message], ['stale', false, 'This alert is out of date. Open Remind Me for the latest.']);
+  r = await call(null, 'POST', 'api/ack', { token, action: 'snooze', minutes: 10, from: 0 });
+  assert.deepEqual([r.data.result, r.data.ok, r.data.message], ['snoozed', true, undefined]);
+  r = await call(null, 'POST', 'api/ack', { token, action: 'ack', from: 0 });
+  assert.deepEqual([r.data.result, r.data.ok], ['recorded', true]);
+  r = await call(null, 'POST', 'api/ack', { token, action: 'ack', from: 0 });
+  assert.deepEqual([r.data.result, r.data.ok], ['already', true], 'a repeat of a done Got it is ok');
+  r = await call(null, 'POST', 'api/ack', { token, action: 'snooze', minutes: 10, from: 0 });
+  assert.deepEqual([r.data.result, r.data.ok, r.data.message], ['already', false, 'Already marked done. No snooze was set.'], 'a Snooze after Got it is not success');
+  r = await call(null, 'POST', 'api/ack', { token: 'x.y', action: 'ack' });
+  assert.deepEqual([r.status, r.data.result, r.data.ok, r.data.message], [200, 'gone', false, "Couldn't confirm this. Open Remind Me."], 'gone is never success');
+  assert.equal((await call(null, 'POST', 'api/ack', { token, action: 'snooze', minutes: 10, from: 'x' })).status, 400, 'bad input stays a 400: a final no');
+});
+
+test('by token: a rolled-back conflict answers 503 (try again), not 409, which the buttons would read as final', { skip: db.skip }, async () => {
+  await household();
+  const real = acks.byToken;
+  acks.byToken = async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); };
+  try {
+    const r = await call(null, 'POST', 'api/ack', { token: 'x.y', action: 'ack' });
+    assert.equal(r.status, 503);
+    assert.equal(r.data.code, 'busy');
+  } finally {
+    acks.byToken = real;
+  }
+  const other = await call(sam, 'POST', 'api/deliveries/999999/ack', {});
+  assert.notEqual(other.status, 503, 'other routes keep their own mapping');
 });

@@ -479,6 +479,17 @@ sends the alert number back as `from`.
 
 ## Phase 2: Home Push action buttons
 
+> **Superseded.** Phase 2 was designed in detail, and built, as a generic feature of Home Push: homePush
+> `docs/plan-notification-actions.md`.
+>
+> - The buttons come from a catalog on the gateway, not from categories built into the app.
+> - Each app's endpoint is the operator's `ACTION_ENDPOINTS` entry, not a URL in the push.
+> - The push carries `category` and `action_data: {token, from}` instead of `action_callback`.
+> - There is no `collapse_id`.
+> - `POST /api/ack` adds `ok` and `message`, and answers a rolled-back conflict with `503`.
+>
+> The text below is the original proposal, kept for the record.
+
 Phase 1 means opening a page. Phase 2 puts **Got it** and **Snooze 10 min** on the notification itself
 (long-press, or swipe on the lock screen), on the Watch too.
 
