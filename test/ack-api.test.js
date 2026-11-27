@@ -286,3 +286,76 @@ test('problems name failed follow-up alerts; the mirror report and health', { sk
   const health = (await call(null, 'GET', 'api/health')).data;
   assert.equal(typeof health.follow_up_lag_s, 'number');
 });
+
+// ── Regressions from review ─────────────────────────────────────────────────
+
+const remindersLib = require('../lib/reminders');
+
+test('deleting a reminder never deadlocks with Got it or a snooze on it', { skip: db.skip }, async () => {
+  for (let i = 0; i < 12; i += 1) {
+    await household();
+    const id = await create({ repeat: { freq: 'daily', count: null } });
+    await passAt(FIRE);
+    // A re-alert waiting to retry for each of them.
+    await passAt('2026-11-04T14:15:20Z', async () => { throw new Error('brrr answered 503'); });
+    const [s, r] = [await deliveryOf(sam), await deliveryOf(riley)];
+    const results = await Promise.allSettled([
+      acks.ack(pool, { deliveryId: s.id, who: sam.id, via: 'app', now: at('2026-11-04T14:16:00Z') }),
+      remindersLib.remove(pool, id),
+      acks.snooze(pool, { deliveryId: r.id, minutes: 10, from: 1, now: at('2026-11-04T14:16:00Z') }),
+    ]);
+    for (const x of results) assert.equal(x.status, 'fulfilled', x.reason?.message);
+    const { rows } = await pool.query("SELECT count(*)::int AS n FROM deliveries WHERE status IN ('pending', 'sending')");
+    assert.equal(rows[0].n, 0, 'nothing left to send');
+  }
+});
+
+test('turning it off and picking Passive in one save works', { skip: db.skip }, async () => {
+  await household();
+  const id = await create({ repeat: { freq: 'daily', count: null } });
+  const v = (await pool.query('SELECT version FROM reminders WHERE id = $1', [id])).rows[0].version;
+  const r = await call(sam, 'PUT', `api/reminders/${id}`, body({ date: '2026-11-04', level: 'passive', ack_required: false, repeat: { freq: 'daily', count: null }, version: v }));
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const row = (await pool.query('SELECT level, ack_required FROM reminders WHERE id = $1', [id])).rows[0];
+  assert.deepEqual(row, { level: 'passive', ack_required: false });
+});
+
+test('someone taken off a private reminder can no longer read it through their old delivery or its token', { skip: db.skip }, async () => {
+  await household();
+  const id = await create({ repeat: { freq: 'daily', count: null } });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const token = acks.makeToken(await acks.ackKey(pool), d.send_key);
+  assert.equal((await call(riley, 'POST', `api/deliveries/${d.id}/ack`, {})).data.result, 'recorded');
+  const v = (await pool.query('SELECT version FROM reminders WHERE id = $1', [id])).rows[0].version;
+  await call(sam, 'PUT', `api/reminders/${id}`, body({ date: '2026-11-05', recipients: [sam.id], repeat: { freq: 'daily', count: null }, version: v }));
+  const again = await call(riley, 'POST', `api/deliveries/${d.id}/ack`, {});
+  assert.equal(again.status, 404);
+  assert.equal(again.data.title, undefined);
+  assert.deepEqual((await call(null, 'POST', 'api/ack', { token, action: 'peek' })).data, { result: 'gone' });
+  assert.ok((await deliveryOf(riley)).acked_at, 'the acknowledgement record is kept');
+});
+
+test('a snooze alert still retrying keeps a normal reminder on the waiting list', { skip: db.skip }, async () => {
+  await household();
+  await create({ ack_required: false, recipients: [riley.id] });
+  await passAt(FIRE);
+  clock = at('2026-11-04T14:05:00Z');
+  await call(riley, 'POST', `api/deliveries/${(await deliveryOf(riley)).id}/snooze`, { minutes: 60, from: 0 });
+  await passAt('2026-11-04T15:05:10Z', async () => { throw new Error('brrr answered 503'); });
+  clock = at('2026-11-04T15:06:00Z');
+  assert.equal((await call(riley, 'GET', 'api/reminders')).data.waiting.length, 1);
+});
+
+test('a snoozed one-off whose recipient is then removed stays in its creator’s recent deliveries', { skip: db.skip }, async () => {
+  await household();
+  await create({ ack_required: false, recipients: [riley.id] });
+  await passAt(FIRE, async () => { throw new Error('brrr answered 503'); }); // first push retrying
+  clock = at('2026-11-04T14:01:00Z');
+  await call(riley, 'POST', `api/deliveries/${(await deliveryOf(riley)).id}/snooze`, { minutes: 30, from: 0 });
+  await members.archive(pool, riley.id, { force: true });
+  const d = await deliveryOf(riley);
+  assert.deepEqual([d.status, d.follow_up_ended], ['cancelled', 'cancelled']);
+  const recent = (await call(sam, 'GET', 'api/deliveries')).data.deliveries;
+  assert.equal(recent.length, 1);
+});
