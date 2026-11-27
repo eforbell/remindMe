@@ -406,3 +406,12 @@ button:disabled { cursor: default; }
 /* Suite identity: a kid's household account (tailnet mode). The People page is a parent's, and so is forgetting a
    suggestion, so their links and controls are hidden; the server refuses them too. */
 .suite-kid a[href="people"], .suite-kid .to-people, .suite-kid .sugg-x { display: none !important; }
+
+/* ── Got it page (ack.html) ─────────────────────────────────────────────── */
+.ack-main { display: flex; flex-direction: column; gap: var(--s-4); padding-top: var(--s-2); }
+.ack-card { min-height: 160px; }
+.ack-done { color: var(--ok); font-weight: 700; font-size: var(--text-md); }
+.ack-snooze { display: flex; flex-direction: column; gap: 8px; }
+.ack-snooze-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.ack-snooze-row .chip-btn { min-height: var(--tap); font-size: var(--text-md); font-weight: 600; }
+.ack-note:empty { display: none; }
