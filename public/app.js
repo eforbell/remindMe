@@ -29,7 +29,7 @@
   const viewerNow = () => (RM.tailnet() ? null : RM.getMe());
 
   // ── Data ─────────────────────────────────────────────────────────────────
-  // True once this call's data is on screen (false if it failed or a newer call replaced it).
+  // true once this call's data is on screen, false if it failed, null if a newer call replaced it (that one draws).
   async function load() {
     const gen = ++loadGen;
     const asViewer = viewerNow();
@@ -38,7 +38,7 @@
         api('api/config'), api('api/members'), api('api/reminders'), api('api/health').catch(() => null),
         state.who || RM.loadWho(),
       ]);
-      if (gen !== loadGen) return;
+      if (gen !== loadGen) return null;
       state.who = who;
       // Who the server took this as: in tailnet mode the header is ignored (only learnt with `who`, so a stale
       // local pick from before switching modes must not count).
@@ -64,7 +64,7 @@
       maybeAskWho();
       return true;
     } catch (err) {
-      if (gen !== loadGen) return false;
+      if (gen !== loadGen) return null;
       $('next-body').innerHTML = `<span class="muted">${esc(err.message)}</span>`;
       $('status-line').textContent = '';
       return false;
@@ -271,7 +271,10 @@
   // always followed by a reload (which redraws the buttons, re-enabled), whether it worked or not.
   async function deliveryAction(id, run) {
     if (acting.has(id)) return;
-    if (viewerNow() !== state.viewer) { await load(); return; }
+    if (viewerNow() !== state.viewer) {
+      if ((await load()) === false) redrawActions();
+      return;
+    }
     acting.add(id);
     renderWaiting();
     try {
@@ -281,11 +284,14 @@
     } finally {
       acting.delete(id);
     }
-    // The reload redraws the buttons. If it fails, redraw from what's on hand so they aren't left disabled.
-    if (!(await load())) {
-      renderWaiting();
-      if (!$('scheduled').classList.contains('hidden')) renderScheduled();
-    }
+    // The reload redraws the buttons. Only if it failed, redraw from what's on hand so they aren't left disabled
+    // (a newer load that replaced it draws newer data itself).
+    if ((await load()) === false) redrawActions();
+  }
+
+  function redrawActions() {
+    renderWaiting();
+    if (!$('scheduled').classList.contains('hidden')) renderScheduled();
   }
 
   async function act(action, id) {
@@ -1053,7 +1059,10 @@
       if (c.ack.on && c.level === 'passive') c.level = state.config.default_level;
     }
     // An older suggestion (no ack) that picks Quiet: Quiet never re-alerts, so the switch goes off with it.
-    if (c.level === 'passive' && c.ack.on) c.ack = { ...c.ack, on: false };
+    if (c.level === 'passive' && c.ack.on) {
+      c.ack = { ...c.ack, on: false };
+      c.ackNote = `${LEVEL.passive?.label || 'Quiet'} makes no sound, so “Until acknowledged” is off.`;
+    }
     if (s.repeat?.freq) {
       c.freq = s.repeat.freq;
       c.every = s.repeat.every || 1;
