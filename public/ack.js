@@ -15,6 +15,10 @@
   let token = '';
   let alertNo = null;
   let gen = 0;
+  // Every request whose answer would redraw the card (peek, act, refresh, recheck) takes the next number; only the
+  // newest one's answer is drawn, so an older peek arriving late can't undo a newer tap's answer.
+  let seq = 0;
+  const start = () => { seq += 1; return seq; };
   let delivery = null;
   let busy = false;
 
@@ -64,6 +68,7 @@
   }
 
   function render(note = '') {
+    if (!delivery) return gone(); // a newer answer already found the link dead
     const d = delivery;
     const due = `<div class="next-meta"><span class="next-when">Due ${esc(timeText(d.scheduled_for))}</span></div>`;
     let state = '';
@@ -93,16 +98,19 @@
     busy = true;
     const g = gen;
     const tok = token;
+    const v = start();
     setButtons(true);
     try {
       const out = await post(tok, body);
       // Another alert's link of the same reminder opened meanwhile: its peek may predate this action, so look again.
       if (g !== gen) return tok === token ? refresh() : undefined;
+      if (v !== seq) return;
       if (out.result === 'gone') return gone();
       if (out.delivery) adopt(out.delivery);
       render(done(out));
     } catch (err) {
       if (g !== gen) return tok === token ? refresh() : undefined;
+      if (v !== seq) return;
       // Refused (a 4xx): nothing changed. No answer or a server error: it may have gone through, so look again.
       if (err.status && err.status < 500) return render(`${err.message} Nothing was changed: try again.`);
       await recheck(g, tok);
@@ -112,14 +120,15 @@
   }
 
   async function recheck(g, tok) {
+    const v = start();
     try {
       const out = await post(tok, { action: 'peek' });
-      if (g !== gen) return;
+      if (g !== gen || v !== seq) return;
       if (out.result !== 'ok') return gone();
       adopt(out.delivery);
       render('Couldn’t confirm that tap. Here’s where it is now.');
     } catch {
-      if (g !== gen) return;
+      if (g !== gen || v !== seq) return;
       render('Couldn’t confirm that tap went through. Reload this page to check before trying again.');
       $('ack-actions').classList.add('hidden'); // not again until a reload shows where it is
     }
@@ -128,9 +137,10 @@
   // The current link, peeked again in place (no skeleton), keeping a note only if the peek can't be made.
   async function refresh() {
     const g = gen;
+    const v = start();
     try {
       const out = await post(token, { action: 'peek' });
-      if (g !== gen) return;
+      if (g !== gen || v !== seq) return;
       if (out.result !== 'ok') return gone();
       adopt(out.delivery);
       render();
@@ -164,14 +174,15 @@
     $('ack-label').textContent = 'Reminder';
     $('ack-body').innerHTML = '<span class="skeleton line" style="width:60%"></span>';
     if (!token) return gone();
+    const v = start();
     try {
       const out = await post(token, { action: 'peek' });
-      if (g !== gen) return;
+      if (g !== gen || v !== seq) return;
       if (out.result !== 'ok') return gone();
       delivery = out.delivery;
       render();
     } catch (err) {
-      if (g !== gen) return;
+      if (g !== gen || v !== seq) return;
       show({ label: 'Can’t reach Remind Me', body: `<div class="next-people">${esc(err.message)}</div>`, note: 'Check your connection and reload this page.' });
     }
   }
