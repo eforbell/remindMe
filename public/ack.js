@@ -96,12 +96,13 @@
     setButtons(true);
     try {
       const out = await post(tok, body);
-      if (g !== gen) return;
+      // Another alert's link of the same reminder opened meanwhile: its peek may predate this action, so look again.
+      if (g !== gen) return tok === token ? refresh() : undefined;
       if (out.result === 'gone') return gone();
       if (out.delivery) adopt(out.delivery);
       render(done(out));
     } catch (err) {
-      if (g !== gen) return;
+      if (g !== gen) return tok === token ? refresh() : undefined;
       // Refused (a 4xx): nothing changed. No answer or a server error: it may have gone through, so look again.
       if (err.status && err.status < 500) return render(`${err.message} Nothing was changed: try again.`);
       await recheck(g, tok);
@@ -120,7 +121,20 @@
     } catch {
       if (g !== gen) return;
       render('Couldn’t confirm that tap went through. Reload this page to check before trying again.');
+      $('ack-actions').classList.add('hidden'); // not again until a reload shows where it is
     }
+  }
+
+  // The current link, peeked again in place (no skeleton), keeping a note only if the peek can't be made.
+  async function refresh() {
+    const g = gen;
+    try {
+      const out = await post(token, { action: 'peek' });
+      if (g !== gen) return;
+      if (out.result !== 'ok') return gone();
+      adopt(out.delivery);
+      render();
+    } catch { /* the card stays as the newer peek showed it */ }
   }
 
   // Got it: `from` is the alert this link came with (a tap from the first push also tells Remind Me it arrived).
