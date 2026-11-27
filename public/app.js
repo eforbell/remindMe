@@ -67,6 +67,8 @@
       if (gen !== loadGen) return null;
       $('next-body').innerHTML = `<span class="muted">${esc(err.message)}</span>`;
       $('status-line').textContent = '';
+      // Whichever load failed last redraws the action buttons from what's on hand, so none stays disabled.
+      if (state.loaded) redrawActions();
       return false;
     }
   }
@@ -271,10 +273,7 @@
   // always followed by a reload (which redraws the buttons, re-enabled), whether it worked or not.
   async function deliveryAction(id, run) {
     if (acting.has(id)) return;
-    if (viewerNow() !== state.viewer) {
-      if ((await load()) === false) redrawActions();
-      return;
-    }
+    if (viewerNow() !== state.viewer) { await load(); return; }
     acting.add(id);
     renderWaiting();
     try {
@@ -284,9 +283,8 @@
     } finally {
       acting.delete(id);
     }
-    // The reload redraws the buttons. Only if it failed, redraw from what's on hand so they aren't left disabled
-    // (a newer load that replaced it draws newer data itself).
-    if ((await load()) === false) redrawActions();
+    // The reload redraws the buttons, or, if the newest load fails, load() redraws them from what's on hand.
+    await load();
   }
 
   function redrawActions() {
