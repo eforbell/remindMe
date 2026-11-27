@@ -82,6 +82,17 @@ async function deliveryOf(member, occurrence = 0) {
   return rows[0];
 }
 
+// Polls until get() is truthy; fails the test after `ms` instead of hanging when the setup went wrong.
+async function waitFor(get, what, ms = 5000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const value = get();
+    if (value) return value;
+    if (Date.now() > until) throw new Error(`Timed out waiting for ${what}.`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 // Wednesday 9:00 New York = 14:00Z.
 const FIRE = '2026-11-04T14:00:10Z';
 
@@ -453,11 +464,14 @@ test('archiving never waits on a reminder just saved with them on it while it ho
     }
   };
   try {
-    const results = await Promise.allSettled([members.archive(pool, riley.id, { force: true, onStep }), (async () => {
-      while (!held) await new Promise((r) => setTimeout(r, 10));
+    let settled = false;
+    const archiving = members.archive(pool, riley.id, { force: true, onStep }).finally(() => { settled = true; });
+    const results = await Promise.allSettled([archiving, (async () => {
+      await waitFor(() => held || settled, 'the dispatcher side to wait for Riley');
       return held;
     })()]);
     for (const x of results) assert.equal(x.status, 'fulfilled', x.reason?.message);
+    assert.ok(held, 'the dispatcher side waited for Riley');
   } finally {
     dispatcherSide?.release();
   }
@@ -470,7 +484,7 @@ test('archiving takes back a first push in flight after turning it off ended its
   const id = await create({ recipients: [riley.id], repeat: { freq: 'daily', count: null } });
   let release;
   const sending = passAt(FIRE, () => new Promise((resolve, reject) => { release = { resolve, reject }; }));
-  while (!release) await new Promise((r) => setTimeout(r, 10));
+  await waitFor(() => release, 'the first push to reach the push service');
   assert.equal((await deliveryOf(riley)).status, 'sending');
   const { rows: [r] } = await pool.query('SELECT version FROM reminders WHERE id = $1', [id]);
   const off = await call(sam, 'PUT', `api/reminders/${id}`, body({ date: '2026-11-05', recipients: [riley.id], ack_required: false, repeat: { freq: 'daily', count: null }, version: r.version }));
