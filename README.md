@@ -99,7 +99,7 @@ Without `TEST_DATABASE_URL`, the database tests are skipped and the pure ones st
 | `HOUSEHOLD_TIMEZONE` | `America/New_York` | IANA zone that reminder times are in |
 | `APP_PUBLIC_URL` | empty | This app's address; used as the tap-through link only when `TAP_OPENS_APP=true` |
 | `TAP_OPENS_APP` | `false` | Tapping a push opens the app. Off by default, so Home Push shows the reminder itself instead |
-| `PUSH_ACTIONS` | `false` | **Home Push only.** Adds **Got it** and **Snooze 10 min** buttons to the notification itself. Needs `APP_PUBLIC_URL` set to this app's https address, and the gateway's `ACTION_ENDPOINTS` to list `remind-me=<APP_PUBLIC_URL>api/ack`. Leave it off with brrr |
+| `PUSH_ACTIONS` | `false` | **Home Push only.** Adds **Got it** and **Snooze 10 min** buttons to the notification itself. Needs `APP_PUBLIC_URL` set to this app's https address, and the gateway's `ACTION_ENDPOINTS` to list `remind-me=` followed by this app's address and `api/ack`, with one `/` between them (for example `remind-me=https://remind.example.ts.net/api/ack`). Leave it off with brrr. A push sent without its buttons is logged once per reason per process (the one-minute timer is a new process each run) |
 | `BRRR_ICON_URL` | empty | Notification icon. Must be publicly reachable, not a tailnet URL |
 | `DELIVERY_GIVE_UP_HOURS` | `12` | How long a failing push keeps retrying (0.25 to 72) |
 | `RETENTION_DAYS` | `180` | Finished reminders and delivery history are pruned after this |

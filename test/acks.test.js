@@ -207,6 +207,19 @@ test('a push service error that echoes the payload stores no token', async () =>
   );
 });
 
+test('a push service error that echoes a payload with only button fields stores no token either', async () => {
+  // Normal reminders carry a token for the first time (PUSH_ACTIONS), in action_data and with no open_url.
+  const token = acks.makeToken('b'.repeat(64), '7d1c2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f');
+  const payload = { title: 'Bins out', message: '9:00 AM', category: 'remind-me.snooze', action_data: { token, from: 0 } };
+  const fetchImpl = async (_url, init) => ({ ok: false, status: 400, text: async () => `bad request: ${init.body}` });
+  await assert.rejects(brrr.send('br_usr_sam_key_0001', payload, { fetchImpl }), (err) => {
+    assert.ok(!err.message.includes(token), err.message);
+    assert.ok(!err.message.includes(token.split('.')[1]), 'not even the signature half');
+    assert.match(err.message, /\[token\]/);
+    return true;
+  });
+});
+
 test('follow-up alert wording', () => {
   const base = { title: 'Take medicine', message: '9:00 AM', thread_id: 'remind-me-4', interruption_level: 'critical', icon_url: 'https://x.example/i.png', expiration_date: 'old' };
   const nag = brrr.buildFollowUpPayload(base, { kind: 'nag', alertNo: 3, wallTime: '09:00', wallDate: '2026-11-03', today: '2026-11-03', expiresAt: at('2026-11-03T15:00:00Z') });

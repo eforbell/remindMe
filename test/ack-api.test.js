@@ -583,6 +583,15 @@ test('by token: a rolled-back conflict answers 503 (try again), not 409, which t
   } finally {
     acks.byToken = real;
   }
-  const other = await call(sam, 'POST', 'api/deliveries/999999/ack', {});
-  assert.notEqual(other.status, 503, 'other routes keep their own mapping');
+  await create({ recipients: [riley.id] });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const realAck = acks.ack;
+  acks.ack = async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); };
+  try {
+    const other = await call(riley, 'POST', `api/deliveries/${d.id}/ack`, {});
+    assert.equal(other.status, 409, 'the app’s own routes keep 409');
+  } finally {
+    acks.ack = realAck;
+  }
 });

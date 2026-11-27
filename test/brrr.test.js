@@ -86,3 +86,20 @@ test('send passes an Idempotency-Key header only when given one', async () => {
   assert.equal(seen[0]['Idempotency-Key'], 'remind-me-0b5e1f0c-7d2a-4c9e-9a51-3f6d2e8b4c17');
   assert.equal('Idempotency-Key' in seen[1], false);
 });
+
+test('send reads Home Push’s answer about the buttons, and nothing in a success body can turn it into a failure', async () => {
+  const ok = (extra) => async () => ({ ok: true, status: 200, ...extra });
+  assert.deepEqual(await brrr.send('br_usr_sam_key_0001', { message: 'x' }, { fetchImpl: ok({ json: async () => ({ actions: 'dropped', actions_reason: 'no_endpoint' }) }) }),
+    { status: 200, actions: 'dropped', actions_reason: 'no_endpoint' });
+  for (const [what, extra] of [
+    ['brrr\'s plain body', { json: async () => { throw new SyntaxError('Unexpected token'); } }],
+    ['no json() at all', {}],
+    ['a JSON array', { json: async () => [1, 2] }],
+    ['JSON null', { json: async () => null }],
+    ['a 204', { status: 204, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } }],
+  ]) {
+    const res = await brrr.send('br_usr_sam_key_0001', { message: 'x' }, { fetchImpl: ok(extra) });
+    assert.ok(res.status === 200 || res.status === 204, what);
+    assert.equal(res.actions, undefined, what);
+  }
+});
