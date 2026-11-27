@@ -780,6 +780,36 @@ test('a pass that started before a deadline does not create an alert after it', 
   assert.equal((await deliveryOf(sam)).follow_up_ended, 'expired');
 });
 
+test('recovering just before the end of the window sends one nag, not two seconds apart', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam], { every: 30, forMin: 60 });
+  await pass(T0, fakeSender());
+  const sender = fakeSender();
+  await pass(at('2026-11-03T15:00:08Z'), sender); // down since before the 30-minute nag
+  await pass(at('2026-11-03T15:00:20Z'), sender);
+  await pass(at('2026-11-03T15:01:00Z'), sender);
+  assert.equal(sender.calls.length, 1);
+  assert.equal((await deliveryOf(sam)).follow_up_ended, 'expired');
+});
+
+test('an alert whose writes waited past the deadline is undone', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await nagReminder([sam]);
+  await pass(T0, fakeSender());
+  const d = await deliveryOf(sam);
+  await pool.query("UPDATE deliveries SET follow_up_at = '2026-11-03T15:00:10Z' WHERE id = $1", [d.id]);
+  // In time when the row is locked and checked (15:02:09); past follow_up_until (15:02:10) once its writes are done.
+  let n = 0;
+  const clock = () => (n++ < 3 ? at('2026-11-03T15:02:09Z') : at('2026-11-03T15:02:11Z'));
+  const sender = fakeSender();
+  await dispatcher.runPass(pool, { source: 'test', now: clock, sendImpl: sender.sendImpl, config: CONFIG });
+  assert.equal(sender.calls.length, 0);
+  assert.equal((await alertsOf(sam)).length, 0);
+  const after = await deliveryOf(sam);
+  assert.equal(after.follow_up_ended, 'expired');
+  assert.equal(after.follow_ups, 0);
+});
+
 test('an older failure never overwrites a newer outcome on the channel', { skip: db.skip }, async () => {
   const [sam] = await household(['Sam']);
   await reminders.create(pool, { text: 'A', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
