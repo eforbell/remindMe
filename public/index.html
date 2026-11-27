@@ -35,6 +35,11 @@
     <main class="home">
       <div id="banners" class="banners" aria-live="polite"></div>
 
+      <section class="waiting hidden" id="waiting" aria-labelledby="waiting-label">
+        <div class="next-label" id="waiting-label">Waiting on you</div>
+        <div class="waiting-list" id="waiting-list"></div>
+      </section>
+
       <section class="next-up" id="next-up" aria-live="polite">
         <div class="next-label">Next up</div>
         <div class="next-body" id="next-body"><span class="skeleton line" style="width:60%"></span></div>
@@ -107,6 +112,7 @@
         <section class="field" aria-labelledby="level-label">
           <div class="field-label" id="level-label">Alert</div>
           <div class="levels" id="levels" role="radiogroup" aria-labelledby="level-label"></div>
+          <div class="ack-field" id="ack-field"></div>
         </section>
 
         <section class="field" aria-labelledby="seen-label">
