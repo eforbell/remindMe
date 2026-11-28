@@ -595,3 +595,29 @@ test('by token: a rolled-back conflict answers 503 (try again), not 409, which t
     acks.ack = realAck;
   }
 });
+
+test('by token: each Got it or Snooze leaves one log line, never the token; a peek leaves none', { skip: db.skip }, async () => {
+  await household();
+  await create({ recipients: [riley.id] });
+  await passAt(FIRE);
+  const d = await deliveryOf(riley);
+  const token = acks.makeToken(await acks.ackKey(pool), d.send_key);
+  clock = at('2026-11-04T14:03:00Z');
+  const lines = [];
+  const real = console.log;
+  console.log = (...args) => { lines.push(args.join(' ')); };
+  try {
+    await call(null, 'POST', 'api/ack', { token, action: 'peek' });
+    await call(null, 'POST', 'api/ack', { token, action: 'snooze', minutes: 10, from: 0 });
+    await call(null, 'POST', 'api/ack', { token, action: 'ack', from: 0, via: 'link' });
+    await call(null, 'POST', 'api/ack', { token: 'x.y', action: 'ack', from: 'not a number' });
+  } finally {
+    console.log = real;
+  }
+  const acksLogged = lines.filter((l) => l.startsWith('[ack]'));
+  assert.equal(acksLogged.length, 3, acksLogged.join('\n'));
+  assert.match(acksLogged[0], new RegExp(`^\\[ack\\] delivery ${d.id} snooze from=0 via=notification -> snoozed until 2026-11-04T14:13:00.000Z$`));
+  assert.match(acksLogged[1], new RegExp(`^\\[ack\\] delivery ${d.id} ack from=0 via=link -> recorded$`));
+  assert.equal(acksLogged[2], '[ack] ack via=notification -> gone', 'no delivery id for a bad token, and junk from is left out');
+  assert.ok(lines.every((l) => !l.includes(token) && !l.includes(token.split('.')[1])), 'never the token');
+});
