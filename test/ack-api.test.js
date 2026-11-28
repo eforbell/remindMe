@@ -576,13 +576,19 @@ test('by token: a rolled-back conflict answers 503 (try again), not 409, which t
   await household();
   const real = acks.byToken;
   acks.byToken = async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); };
+  const logged = [];
+  const realLog = console.log;
+  console.log = (...args) => { logged.push(args.join(' ')); };
   try {
     const r = await call(null, 'POST', 'api/ack', { token: 'x.y', action: 'ack' });
     assert.equal(r.status, 503);
     assert.equal(r.data.code, 'busy');
+    await call(null, 'POST', 'api/ack', { token: 'x.y', action: 'peek' });
   } finally {
     acks.byToken = real;
+    console.log = realLog;
   }
+  assert.deepEqual(logged.filter((l) => l.startsWith('[ack]')), ['[ack] ack -> busy (rolled back; answered 503)'], 'a busy peek logs nothing');
   await create({ recipients: [riley.id] });
   await passAt(FIRE);
   const d = await deliveryOf(riley);
@@ -611,13 +617,18 @@ test('by token: each Got it or Snooze leaves one log line, never the token; a pe
     await call(null, 'POST', 'api/ack', { token, action: 'snooze', minutes: 10, from: 0 });
     await call(null, 'POST', 'api/ack', { token, action: 'ack', from: 0, via: 'link' });
     await call(null, 'POST', 'api/ack', { token: 'x.y', action: 'ack', from: 'not a number' });
+    // Text trying to forge a log line is refused before anything is logged.
+    assert.equal((await call(null, 'POST', 'api/ack', { token, action: 'ack\n[ack] forged', from: 0 })).status, 400);
+    assert.equal((await call(null, 'POST', 'api/ack', { token, action: 'ack', from: 0, via: 'x\n[ack] forged' })).status, 400);
   } finally {
     console.log = real;
   }
   const acksLogged = lines.filter((l) => l.startsWith('[ack]'));
   assert.equal(acksLogged.length, 3, acksLogged.join('\n'));
-  assert.match(acksLogged[0], new RegExp(`^\\[ack\\] delivery ${d.id} snooze from=0 via=notification -> snoozed until 2026-11-04T14:13:00.000Z$`));
-  assert.match(acksLogged[1], new RegExp(`^\\[ack\\] delivery ${d.id} ack from=0 via=link -> recorded$`));
+  assert.equal(acksLogged[0], `[ack] delivery ${d.id} snooze from=0 via=notification -> snoozed until 2026-11-04T14:13:00.000Z`);
+  assert.equal(acksLogged[1], `[ack] delivery ${d.id} ack from=0 via=link -> recorded`);
   assert.equal(acksLogged[2], '[ack] ack via=notification -> gone', 'no delivery id for a bad token, and junk from is left out');
-  assert.ok(lines.every((l) => !l.includes(token) && !l.includes(token.split('.')[1])), 'never the token');
+  assert.ok(lines.every((l) => !l.includes(token) && !l.includes(token.split('.')[0]) && !l.includes(token.split('.')[1]) && !l.includes(d.send_key)),
+    'never the token, either half, or the send key it is made from');
+  assert.ok(!lines.some((l) => l.includes('forged')), 'no forged line');
 });
