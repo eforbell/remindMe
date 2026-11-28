@@ -1130,3 +1130,159 @@ test('the Got it page address comes from APP_PUBLIC_URL, plain http(s) only', ()
   for (const bad of ['', null, 'ftp://x/', 'https://x/?a=1', 'https://x/#y', 'https://u:p@x/', 'not a url']) assert.equal(dispatcher.ackBaseUrl(bad), null, String(bad));
   assert.equal(dispatcher.defaultConfig({ APP_PUBLIC_URL: 'https://home.example/remind/' }).ackBaseUrl, 'https://home.example/remind/', 'whatever TAP_OPENS_APP says');
 });
+
+// ── Home Push action buttons (PUSH_ACTIONS; homePush docs/plan-notification-actions.md) ──────────────────────
+
+test('with PUSH_ACTIONS each alert carries its buttons, worked out from the delivery at send time', { skip: db.skip }, async () => {
+  const [sam, riley] = await household();
+  await nagReminder([riley]);
+  await reminders.create(pool, { text: 'Bins out', date: '2026-11-03', time: '09:00', recipients: [sam.id] }, { timezone: TZ, now: at('2026-11-03T12:00:00Z') });
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/', pushActions: true };
+  const sender = fakeSender();
+  await pass(T0, sender, { config });
+  for (const t of ['2026-11-03T14:15:20Z', '2026-11-03T14:30:30Z', '2026-11-03T14:45:40Z', '2026-11-03T15:00:50Z']) await pass(at(t), sender, { config });
+  const key = await acks.ackKey(pool);
+  const d = await deliveryOf(riley);
+  const calls = callsTo(sender, 'Riley');
+  assert.equal(calls.length, 5);
+  assert.deepEqual(calls.map((c) => c.payload.category), ['remind-me.ack', 'remind-me.ack', 'remind-me.ack', 'remind-me.ack', 'remind-me.ack-only'],
+    'the last nag offers Got it only: the delivery expired as it was created, so Snooze would be refused');
+  calls.forEach((c, i) => {
+    assert.equal(acks.verifyToken(key, c.payload.action_data.token), d.send_key, 'the delivery’s token on every alert');
+    assert.equal(c.payload.action_data.from, i, 'and the alert’s own number as from');
+    assert.deepEqual(Object.keys(c.payload.action_data).sort(), ['from', 'token']);
+    assert.equal(c.payload.collapse_id, undefined, 'no collapsing in this plan');
+  });
+  const bins = callsTo(sender, 'Sam')[0].payload;
+  assert.equal(bins.category, 'remind-me.snooze', 'a normal reminder offers Snooze');
+  assert.equal(acks.verifyToken(key, bins.action_data.token), (await deliveryOf(sam)).send_key);
+  assert.equal(bins.open_url, undefined, 'a normal reminder still gets no Got it link');
+  const { rows } = await pool.query('SELECT payload FROM deliveries');
+  assert.ok(rows.every((r) => r.payload.category === undefined && r.payload.action_data === undefined), 'nothing about buttons is stored');
+
+  // Off by default: no button fields at all.
+  const [jo] = await household(['Jo']);
+  await nagReminder([jo]);
+  const plain = fakeSender();
+  await pass(T0, plain, { config: { ...CONFIG, ackBaseUrl: 'https://home.example/remind/' } });
+  assert.equal(plain.calls[0].payload.category, undefined);
+  assert.equal(plain.calls[0].payload.action_data, undefined);
+});
+
+test('buttons follow the endpoints’ rules: stale alerts, stopped deliveries and the horizon', () => {
+  const now = at('2026-11-03T14:20:00Z');
+  const base = { delivery_send_key: 'k', acked: false, follow_up_ended: null, follow_ups: 2, follow_up_horizon: '2026-11-03T18:00:00Z', ack_required: true };
+  const b = (alertNo, ctx = {}) => dispatcher.buttonsFor({ alert_no: alertNo }, { ...base, ...ctx }, now);
+  assert.equal(b(2), 'remind-me.ack', 'the latest alert: both');
+  assert.equal(b(1), 'remind-me.ack-only', 'an older alert still retrying: a snooze from it would be stale');
+  assert.equal(b(2, { follow_up_ended: 'expired' }), 'remind-me.ack-only', 'expired: Got it still records');
+  assert.equal(b(2, { follow_up_horizon: '2026-11-03T14:21:00Z' }), 'remind-me.ack-only', 'too close to the horizon to snooze');
+  assert.equal(b(0, { follow_up_horizon: null, follow_ups: 0 }), 'remind-me.ack', 'a first push before it settles (no horizon yet)');
+  for (const ended of ['superseded', 'cancelled']) assert.equal(b(2, { follow_up_ended: ended }), null, ended);
+  assert.equal(b(2, { acked: true }), null, 'acknowledged');
+  assert.equal(b(2, { delivery_send_key: null }), null, 'no token to make');
+  assert.equal(b(0, { ack_required: false, follow_ups: 0 }), 'remind-me.snooze', 'normal reminder');
+  assert.equal(b(0, { ack_required: false, follow_ups: 0, follow_up_ended: 'expired' }), null, 'normal reminder that can no longer be snoozed');
+});
+
+test('PUSH_ACTIONS refuses to start without an https APP_PUBLIC_URL', () => {
+  assert.equal(dispatcher.defaultConfig({}).pushActions, false);
+  assert.equal(dispatcher.defaultConfig({ PUSH_ACTIONS: ' TRUE ' }).pushActions, true);
+  for (const env of [{ PUSH_ACTIONS: 'true' }, { PUSH_ACTIONS: 'true', APP_PUBLIC_URL: 'http://192.168.1.5:3013/' }]) {
+    assert.throws(() => dispatcher.checkConfig(dispatcher.defaultConfig(env)), /PUSH_ACTIONS=true needs APP_PUBLIC_URL/, JSON.stringify(env));
+  }
+  assert.doesNotThrow(() => dispatcher.checkConfig(dispatcher.defaultConfig({ PUSH_ACTIONS: 'true', APP_PUBLIC_URL: 'https://remind.example/' })));
+  assert.doesNotThrow(() => dispatcher.checkConfig(dispatcher.defaultConfig({ APP_PUBLIC_URL: 'http://192.168.1.5:3013/' })), 'http links alone are still fine');
+});
+
+test('a push Home Push sent without its buttons is logged once per reason, never with the payload', { skip: db.skip }, async () => {
+  const [, riley] = await household();
+  await nagReminder([riley], { repeat: { freq: 'daily', count: null } });
+  const errors = [];
+  const log = { log() {}, error: (m) => errors.push(m) };
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/', pushActions: true };
+  const tokens = [];
+  const dropping = async (secret, payload) => { tokens.push(payload.action_data.token); return { status: 200, actions: 'dropped', actions_reason: 'no_endpoint' }; };
+  await pass(T0, { sendImpl: dropping }, { config, log });
+  await pass(at('2026-11-03T14:15:20Z'), { sendImpl: dropping }, { config, log });
+  assert.equal(tokens.length, 2, 'both alerts were sent (and still count as sent)');
+  const notes = errors.filter((m) => m.includes('without its buttons'));
+  assert.equal(notes.length, 1, 'once per reason per process');
+  assert.match(notes[0], /no_endpoint/);
+  assert.ok(tokens.every((t) => !errors.join('\n').includes(t)), 'no token in the log');
+  assert.equal((await deliveryOf(riley)).status, 'sent');
+});
+
+test('PUSH_ACTIONS without an https address: the web app and the timer both refuse', async () => {
+  const { createApp } = require('../lib/app');
+  assert.throws(() => createApp({ pool: {}, timezone: TZ, env: { PUSH_ACTIONS: 'true', APP_PUBLIC_URL: 'http://192.168.1.5:3013/' } }), /PUSH_ACTIONS=true needs APP_PUBLIC_URL/);
+  const saved = { PUSH_ACTIONS: process.env.PUSH_ACTIONS, APP_PUBLIC_URL: process.env.APP_PUBLIC_URL };
+  process.env.PUSH_ACTIONS = 'true';
+  delete process.env.APP_PUBLIC_URL;
+  try {
+    await assert.rejects(dispatcher.runPass({}, { source: 'test' }), /PUSH_ACTIONS=true needs APP_PUBLIC_URL/, 'the timer uses the default config');
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});
+
+test('with PUSH_ACTIONS the mirror’s copy still has no buttons and no token', { skip: db.skip }, async () => {
+  const [sam] = await household(['Sam']);
+  await members.setMirrorKey(pool, sam.id, { key: 'mirror_sam_key_0001' });
+  await nagReminder([sam]);
+  const mirrored = [];
+  const mirrorImpl = async (_base, _secret, payload) => { mirrored.push(payload); return { status: 200, id: null }; };
+  const sender = fakeSender();
+  await pass(T0, sender, { config: { ...CONFIG, ackBaseUrl: 'https://home.example/remind/', pushActions: true, mirrorUrl: 'https://mirror.example' }, mirrorImpl });
+  assert.equal(sender.calls[0].payload.category, 'remind-me.ack');
+  assert.equal(mirrored.length, 1);
+  assert.equal(mirrored[0].category, undefined);
+  assert.equal(mirrored[0].action_data, undefined);
+});
+
+test('the buttons a push offers are the ones the token route accepts (one rule for both)', { skip: db.skip }, async () => {
+  const [, riley] = await household();
+  await nagReminder([riley], { forMin: 60 });
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/', pushActions: true };
+  const sender = fakeSender();
+  for (const t of [T0, at('2026-11-03T14:15:20Z'), at('2026-11-03T14:30:30Z'), at('2026-11-03T14:45:40Z'), at('2026-11-03T15:00:50Z')]) await pass(t, sender, { config });
+  const calls = callsTo(sender, 'Riley');
+  const last = calls[calls.length - 1].payload;
+  assert.equal(last.category, 'remind-me.ack-only');
+  const tap = (p, action) => acks.byToken(pool, { token: p.action_data.token, action, minutes: 10, from: p.action_data.from, now: at('2026-11-03T15:01:00Z') });
+  assert.equal((await tap(last, 'snooze')).result, 'stale', 'ack-only: Snooze would be refused');
+  assert.equal((await tap(calls[1].payload, 'snooze')).result, 'stale', 'an older alert: refused too');
+  assert.equal((await tap(last, 'ack')).result, 'recorded', 'Got it from the last nag still records');
+
+  // A snooze alert that expires the delivery offers Got it only.
+  const [jo] = await household(['Jo']);
+  await nagReminder([jo], { forMin: 60 });
+  const s2 = fakeSender();
+  await pass(T0, s2, { config });
+  const first = s2.calls[0].payload;
+  assert.equal(first.category, 'remind-me.ack');
+  assert.equal((await acks.byToken(pool, { token: first.action_data.token, action: 'snooze', minutes: 60, from: 0, now: at('2026-11-03T14:05:00Z') })).result, 'snoozed',
+    'what the first push offered is accepted');
+  await pass(at('2026-11-03T15:05:20Z'), s2, { config }); // the snooze alert, due 15:05, past the last nag's time
+  assert.equal(s2.calls.length, 2);
+  const snoozeAlert = s2.calls[1].payload;
+  assert.equal((await deliveryOf(jo)).follow_up_ended, 'expired');
+  assert.equal(snoozeAlert.category, 'remind-me.ack-only');
+});
+
+test('the logged drop reason is only ever one of the gateway’s codes, and logging can never fail a sent push', { skip: db.skip }, async () => {
+  const [, riley] = await household();
+  await nagReminder([riley]);
+  const errors = [];
+  const config = { ...CONFIG, ackBaseUrl: 'https://home.example/remind/', pushActions: true };
+  const weird = async () => ({ status: 200, actions: 'dropped', actions_reason: 'br_usr_secret_leak\nline two' });
+  await pass(T0, { sendImpl: weird }, { config, log: { log() {}, error: (m) => errors.push(m) } });
+  assert.ok(!errors.join('\n').includes('secret_leak'), 'free text never reaches the log');
+  assert.equal((await deliveryOf(riley)).status, 'sent');
+  // A log that throws: the push still counts as sent, not failed and retried.
+  const [jo] = await household(['Jo']);
+  await nagReminder([jo]);
+  await pass(T0, { sendImpl: async () => ({ status: 200, actions: 'dropped', actions_reason: 'too_large' }) }, // not logged yet: log.error runs
+    { config, log: { log() {}, error() { throw new Error('log down'); } } });
+  assert.equal((await deliveryOf(jo)).status, 'sent');
+});
